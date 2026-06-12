@@ -1,23 +1,18 @@
 import React, { useState } from "react";
 import { ProfileSettings, ThemeName, Language } from "../types";
-import { 
-  Heart, 
-  Bell, 
-  Palette, 
-  Shield, 
-  Lock, 
-  Eye, 
-  EyeOff, 
-  LogOut, 
-  Check, 
-  Edit2, 
-  Camera, 
-  Upload, 
+import {
+  Heart,
+  Palette,
+  Shield,
+  Eye,
+  EyeOff,
+  Check,
+  Camera,
   X,
-  FileText,
   Languages,
   Volume2,
-  VolumeX
+  VolumeX,
+  Lock
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { audio } from "../utils/audio";
@@ -368,18 +363,24 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
 
       </div>
 
-      {/* POPUP MODAL WRAPPING DESIGNS (#8) */}
+      {/* POPUP MODAL WRAPPING DESIGNS (#8) — bottom-sheet style */}
       <AnimatePresence>
-        
+
         {/* MODAL 1: EDIT ESSENTIAL PROFILE & LOCAL AVATARS */}
         {activeModal === "profile" && (
-          <div className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-end"
+            onClick={() => setActiveModal(null)}
+          >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-3xl p-6 max-w-lg w-full space-y-4 shadow-xl border border-rose-100/20"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-t-3xl p-6 w-full max-w-2xl mx-auto space-y-4 shadow-xl border border-rose-100/20 max-h-[90vh] overflow-y-auto"
             >
+              <div className="w-10 h-1 bg-stone-200 rounded-full mx-auto -mt-1 mb-2" />
               <div className="flex justify-between items-center pb-2 border-b border-rose-50">
                 <h3 className="text-md font-bold text-gray-800">
                   {t.tileProfileTitle} 💌
@@ -391,100 +392,63 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
 
               <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
                 
-                {/* LOCAL IMAGE UPLOADER BOXES (#7) */}
+                {/* AVATAR PICKERS — simple system file picker */}
                 <div className="space-y-3">
                   <span className="text-[10px] bg-rose-50 text-[#ad292f] font-bold px-2 py-1 rounded-full uppercase tracking-wider">
                     {t.editAvatars}
                   </span>
-                  
-                  {/* Partner 1 Local file dropzone */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                    <div className="space-y-1">
-                      <label className="block text-[11px] font-bold text-gray-500">
-                        {profile.partner1Name} ({t.p1NameLabel})
-                      </label>
-                      
-                      <div 
-                        onDragEnter={(e) => handleDrag(e, "p1", true)}
-                        onDragLeave={(e) => handleDrag(e, "p1", false)}
-                        onDragOver={(e) => handleDrag(e, "p1", true)}
-                        onDrop={(e) => handleDrop(e, "partner1", "p1")}
-                        className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-colors relative flex flex-col items-center justify-center text-[10px] ${
-                          dragActive["p1"] ? "border-[#ad292f] bg-[#fceae9]/30" : "border-gray-200 hover:border-[#ad292f]"
-                        }`}
-                      >
-                        <Upload size={14} className="text-[#ad292f] mb-1 animate-bounce" />
-                        <span className="font-semibold text-gray-400">{t.avatarUploadPrompt}</span>
-                        <input 
-                          type="file" 
-                          accept="image/*"
-                          onChange={(e) => {
-                            if (e.target.files) handleLocalImageUpload("partner1", e.target.files[0]);
-                          }}
-                          className="absolute inset-0 opacity-0 cursor-pointer"
-                        />
-                        {p1Avatar.startsWith("data:") && (
-                          <span className="mt-1 text-[8px] font-bold text-emerald-600 flex items-center gap-0.5">
-                            <Check size={9} />已读入本地图片 Base64
-                          </span>
-                        )}
-                      </div>
 
-                      <div className="space-y-1 mt-1.5">
-                        <span className="text-[9px] text-gray-400 block font-semibold">{t.orUrlText}</span>
-                        <input
-                          type="text"
-                          value={p1Avatar}
-                          onChange={(e) => setP1Avatar(e.target.value)}
-                          className="w-full text-[10px] p-2 border border-gray-150 rounded-xl"
-                        />
+                  <div className="grid grid-cols-2 gap-3 pt-2">
+                    {/* Partner 1 */}
+                    <div className="space-y-2 text-center">
+                      <p className="text-[11px] font-bold text-gray-500">{profile.partner1Name}</p>
+                      <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-rose-100 mx-auto">
+                        <img src={p1Avatar} className="w-full h-full object-cover" alt="" />
                       </div>
+                      <label className="block cursor-pointer">
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#ad292f] bg-rose-50 hover:bg-rose-100 border border-rose-100 px-3 py-1.5 rounded-full transition-all">
+                          <Camera size={12} />
+                          {language === "zh" ? "选择图片" : "Choose Photo"}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => { if (e.target.files) handleLocalImageUpload("partner1", e.target.files[0]); }}
+                        />
+                      </label>
+                      {p1Avatar.startsWith("data:") && (
+                        <span className="text-[9px] font-bold text-emerald-600 flex items-center justify-center gap-0.5">
+                          <Check size={9} />{language === "zh" ? "已更新" : "Updated"}
+                        </span>
+                      )}
                     </div>
 
-                    {/* Partner 2 Local file dropzone */}
-                    <div className="space-y-1">
-                      <label className="block text-[11px] font-bold text-gray-500">
-                        {profile.partner2Name} ({t.p2NameLabel})
-                      </label>
-                      
-                      <div 
-                        onDragEnter={(e) => handleDrag(e, "p2", true)}
-                        onDragLeave={(e) => handleDrag(e, "p2", false)}
-                        onDragOver={(e) => handleDrag(e, "p2", true)}
-                        onDrop={(e) => handleDrop(e, "partner2", "p2")}
-                        className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-colors relative flex flex-col items-center justify-center text-[10px] ${
-                          dragActive["p2"] ? "border-[#ad292f] bg-[#fceae9]/30" : "border-gray-200 hover:border-[#ad292f]"
-                        }`}
-                      >
-                        <Upload size={14} className="text-[#ad292f] mb-1 animate-bounce" />
-                        <span className="font-semibold text-gray-400">{t.avatarUploadPrompt}</span>
-                        <input 
-                          type="file" 
-                          accept="image/*"
-                          onChange={(e) => {
-                            if (e.target.files) handleLocalImageUpload("partner2", e.target.files[0]);
-                          }}
-                          className="absolute inset-0 opacity-0 cursor-pointer"
-                        />
-                        {p2Avatar.startsWith("data:") && (
-                          <span className="mt-1 text-[8px] font-bold text-emerald-600 flex items-center gap-0.5">
-                            <Check size={9} />已读入本地图片 Base64
-                          </span>
-                        )}
+                    {/* Partner 2 */}
+                    <div className="space-y-2 text-center">
+                      <p className="text-[11px] font-bold text-gray-500">{profile.partner2Name}</p>
+                      <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-rose-100 mx-auto">
+                        <img src={p2Avatar} className="w-full h-full object-cover" alt="" />
                       </div>
-
-                      <div className="space-y-1 mt-1.5">
-                        <span className="text-[9px] text-gray-400 block font-semibold">{t.orUrlText}</span>
+                      <label className="block cursor-pointer">
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#ad292f] bg-rose-50 hover:bg-rose-100 border border-rose-100 px-3 py-1.5 rounded-full transition-all">
+                          <Camera size={12} />
+                          {language === "zh" ? "选择图片" : "Choose Photo"}
+                        </span>
                         <input
-                          type="text"
-                          value={p2Avatar}
-                          onChange={(e) => setP2Avatar(e.target.value)}
-                          className="w-full text-[10px] p-2 border border-gray-150 rounded-xl"
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => { if (e.target.files) handleLocalImageUpload("partner2", e.target.files[0]); }}
                         />
-                      </div>
+                      </label>
+                      {p2Avatar.startsWith("data:") && (
+                        <span className="text-[9px] font-bold text-emerald-600 flex items-center justify-center gap-0.5">
+                          <Check size={9} />{language === "zh" ? "已更新" : "Updated"}
+                        </span>
+                      )}
                     </div>
                   </div>
-
                 </div>
 
                 {/* Nicknames parameters input */}
@@ -543,13 +507,19 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
 
         {/* MODAL 2: PICK THEME presets popup */}
         {activeModal === "theme" && (
-          <div className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-end"
+            onClick={() => setActiveModal(null)}
+          >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-3xl p-6 max-w-sm w-full space-y-4 shadow-xl select-none"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-t-3xl p-6 w-full max-w-2xl mx-auto space-y-4 shadow-xl select-none max-h-[85vh] overflow-y-auto"
             >
+              <div className="w-10 h-1 bg-stone-200 rounded-full mx-auto -mt-1 mb-2" />
               <div className="flex justify-between items-center pb-2 border-b border-rose-50">
                 <h3 className="text-md font-bold text-gray-800">
                   {t.tileThemeTitle} 🎨
@@ -618,13 +588,19 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
 
         {/* MODAL 3: SECURITY PASSCODE DIALOG */}
         {activeModal === "security" && (
-          <div className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-end"
+            onClick={() => setActiveModal(null)}
+          >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-3xl p-6 max-w-sm w-full space-y-4 shadow-xl select-none"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-t-3xl p-6 w-full max-w-2xl mx-auto space-y-4 shadow-xl select-none max-h-[85vh] overflow-y-auto"
             >
+              <div className="w-10 h-1 bg-stone-200 rounded-full mx-auto -mt-1 mb-2" />
               <div className="flex justify-between items-center pb-2 border-b border-rose-50">
                 <h3 className="text-md font-bold text-gray-800">
                   {t.tileSecurityTitle} 🔒
@@ -680,13 +656,19 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
 
         {/* MODAL 4: LANGUAGE SETTINGS DIALOG */}
         {activeModal === "language" && (
-          <div className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-[#382e2e]/40 backdrop-blur-md z-[100] flex items-end"
+            onClick={() => setActiveModal(null)}
+          >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-3xl p-6 max-w-sm w-full space-y-4 shadow-xl select-none"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-t-3xl p-6 w-full max-w-2xl mx-auto space-y-4 shadow-xl select-none max-h-[85vh] overflow-y-auto"
             >
+              <div className="w-10 h-1 bg-stone-200 rounded-full mx-auto -mt-1 mb-2" />
               <div className="flex justify-between items-center pb-2 border-b border-rose-50">
                 <h3 className="text-md font-bold text-gray-800">
                   {t.tileLangTitle} 🌐

@@ -40,7 +40,78 @@
   font-family: "Playfair Display", Georgia, serif;
 }
 
+@keyframes swing {
+  0%, 100% { transform: rotate(-10deg); }
+  50% { transform: rotate(10deg); }
+}
+
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+/* ── Mobile optimizations ── */
+
+/* Smooth momentum scrolling on iOS */
+* {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Safe area for notch/home bar */
+#root {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Bottom nav safe area */
+#scrapbook-bottom-nav {
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+/* Prevent font size inflation on mobile orientation change */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Smooth scroll for the whole app */
+html, body {
+  scroll-behavior: smooth;
+  overscroll-behavior: none;
+}
+
+/* Better tap target minimum size on mobile */
+button, a, [role="button"] {
+  min-height: 36px;
+  min-width: 36px;
+}
+
+/* Flip-book mobile tap hint arrows */
+.diary-flip-hint-left,
+.diary-flip-hint-right {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(173, 41, 47, 0.08);
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0.5;
+  transition: opacity 0.3s;
+  z-index: 10;
+}
+.diary-flip-hint-left { left: 6px; }
+.diary-flip-hint-right { right: 6px; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.4s ease-out forwards;
 }

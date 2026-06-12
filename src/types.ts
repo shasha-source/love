@@ -7,6 +7,13 @@ export interface Comment {
   avatar: string;
   content: string;
   timestamp: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video";
+}
+
+export interface MediaItem {
+  url: string;
+  type: "image" | "video";
 }
 
 export interface TimelinePost {
@@ -17,6 +24,7 @@ export interface TimelinePost {
   content: string;
   imageUrl?: string;
   videoUrl?: string;
+  mediaItems?: MediaItem[];
   mood?: string;
   likes: number;
   likedByUser: boolean;
@@ -52,6 +60,9 @@ export interface CalendarEvent {
   description: string;
   location?: string;
   eventType: "anniversary" | "birthday" | "custom";
+  likes?: number;
+  likedByUser?: boolean;
+  comments?: Array<{ id: string; author: string; content: string; timestamp: string; mediaUrl?: string; mediaType?: "image" | "video" }>;
 }
 
 export interface ProfileSettings {

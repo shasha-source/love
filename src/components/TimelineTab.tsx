@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { TimelinePost, ProfileSettings, Comment, CalendarEvent } from "../types";
 import { 
   Heart, 
@@ -23,9 +23,11 @@ import {
   Gift,
   MapPin,
   Mic,
-  MicOff
+  MicOff,
+  ChevronUp
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { audio } from "../utils/audio";
 
 interface TimelineTabProps {
   posts: TimelinePost[];
@@ -46,22 +48,41 @@ export default function TimelineTab({
   events = [],
   onUpdateEvents = () => {}
 }: TimelineTabProps) {
-  const [viewStyle, setViewStyle] = useState<"stream" | "calendar" | "diary">("stream"); // Toggle view style (#4)
+  const [viewStyle, setViewStyle] = useState<"stream" | "calendar" | "diary">(() => {
+    return (localStorage.getItem("couple_view_style") as "stream" | "calendar" | "diary") || "stream";
+  }); // Toggle view style (#4) — persisted to localStorage
   const [diaryBookIndex, setDiaryBookIndex] = useState(0);
   const [flipDirection, setFlipDirection] = useState<"next" | "prev">("next");
+  const [showToc, setShowToc] = useState(false);
 
   // 3. Calendar view integrated states
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(5); // June (0-indexed so 5 is June)
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [showAddEventForm, setShowAddEventForm] = useState(false);
   const [newEventTitle, setNewEventTitle] = useState("");
-  const [newEventDate, setNewEventDate] = useState("2026-06-24");
+  const [newEventDate, setNewEventDate] = useState(""); // MM-DD for anniversary, YYYY-MM-DD for others
+  const [newEventMonth, setNewEventMonth] = useState("01");
+  const [newEventDay, setNewEventDay] = useState("01");
   const [newEventDesc, setNewEventDesc] = useState("");
   const [newEventLoc, setNewEventLoc] = useState("");
-  const [newEventType, setNewEventType] = useState<"anniversary" | "birthday" | "custom">("custom");
+  const [newEventType, setNewEventType] = useState<"anniversary" | "birthday" | "custom">("anniversary");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [aiHighlight, setAiHighlight] = useState("");
-  const [aiHighlightLoading, setAiHighlightLoading] = useState(false);
+  const [showAnniversariesOnly, setShowAnniversariesOnly] = useState(false);
+  const [commentEventInputs, setCommentEventInputs] = useState<Record<string, string>>({});
+  const [commentPostInputs, setCommentPostInputs] = useState<Record<string, string>>({});
+  const [commentPendingMedia, setCommentPendingMedia] = useState<Record<string, {url: string; type: "image"|"video"}>>({});
+  const [commentListeningId, setCommentListeningId] = useState<string | null>(null);
+  const commentRecognitionRef = React.useRef<any>(null);
+  const [likeAnimEventId, setLikeAnimEventId] = useState<string | null>(null);
+  const [streamSearchQuery, setStreamSearchQuery] = useState("");
+  const [streamSearchResult, setStreamSearchResult] = useState<string | null>(null);
+  const [streamMatchedPosts, setStreamMatchedPosts] = useState<typeof posts>([]);
+  const [isStreamSearching, setIsStreamSearching] = useState(false);
+  const [calendarListTab, setCalendarListTab] = useState<"records" | "anniversaries">("records");
+  const [scrollToPostId, setScrollToPostId] = useState<string | null>(null);
+  const [newPostMediaItems, setNewPostMediaItems] = useState<{url: string; type: "image"|"video"; preview?: string}[]>([]);
+  const [showScrollTop, setShowScrollTop] = useState(false);
 
   const calendarT = {
     zh: {
@@ -129,12 +150,24 @@ export default function TimelineTab({
   }[language];
 
   const calculateDaysLeft = (eventDateStr: string) => {
-    const today = new Date("2026-06-12T00:00:00");
-    const evDate = new Date(eventDateStr);
-    
-    const diffTime = evDate.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    // Support both MM-DD (recurring yearly) and YYYY-MM-DD (fixed date)
+    const isRecurring = /^\d{2}-\d{2}$/.test(eventDateStr);
+    if (isRecurring) {
+      const [mm, dd] = eventDateStr.split("-").map(Number);
+      let thisYear = new Date(today.getFullYear(), mm - 1, dd);
+      thisYear.setHours(0, 0, 0, 0);
+      if (thisYear.getTime() < today.getTime()) {
+        thisYear = new Date(today.getFullYear() + 1, mm - 1, dd);
+        thisYear.setHours(0, 0, 0, 0);
+      }
+      const diffDays = Math.round((thisYear.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      if (diffDays === 0) return calendarT.todayEvent;
+      return `${diffDays} ${calendarT.daysLeft}`;
+    }
+    const evDate = new Date(eventDateStr + "T12:00:00");
+    const diffDays = Math.ceil((evDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
     if (diffDays === 0) return calendarT.todayEvent;
     if (diffDays < 0) return `${Math.abs(diffDays)} ${calendarT.yesterdayEvent}`;
     return `${diffDays} ${calendarT.daysLeft}`;
@@ -157,6 +190,57 @@ export default function TimelineTab({
     }
 
     return days;
+  };
+
+  // Stream AI search
+  const handleStreamSearch = async () => {
+    const q = streamSearchQuery.trim();
+    if (!q) return;
+    setIsStreamSearching(true);
+    setStreamSearchResult(null);
+    try {
+      // Client-side pre-filter: find posts whose content contains the query
+      const qLower = q.toLowerCase();
+      const directMatches = posts.filter(p =>
+        p.content?.toLowerCase().includes(qLower) ||
+        p.author?.toLowerCase().includes(qLower) ||
+        p.mood?.toLowerCase().includes(qLower) ||
+        p.timestamp?.slice(0, 10).includes(qLower)
+      );
+      // Build summary: direct matches first, then all posts as context
+      const formatPost = (p: typeof posts[0]) =>
+        `[${p.timestamp.slice(0, 10)}] ${p.author}: ${p.content.slice(0, 200)}${p.imageUrl ? " [有图]" : ""}${p.videoUrl ? " [有视频]" : ""}${p.mood ? ` 心情:${p.mood}` : ""}`;
+      const matchSummary = directMatches.map(formatPost).join("\n");
+      const allSummary = posts.map(formatPost).join("\n");
+      const hasDirectMatches = directMatches.length > 0;
+      const locatePrompt = language === "zh"
+        ? hasDirectMatches
+          ? `在我们的时光记录里，找到了以下与"${q}"相关的${directMatches.length}条记录：\n${matchSummary}\n\n请用温暖的语气总结这些记录，并给一句感人的结语。`
+          : `请在以下所有时光记录中搜索与"${q}"相关的内容，如有匹配请列出（最多5条），若无匹配请温柔告知。记录如下：\n${allSummary}`
+        : hasDirectMatches
+          ? `Found ${directMatches.length} entries matching "${q}" in our timeline:\n${matchSummary}\n\nPlease summarize warmly and add a loving closing line.`
+          : `Search our timeline for "${q}" and list up to 5 matching entries (date, author, summary). Records:\n${allSummary}`;
+      const resp = await fetch("/api/ai-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: locatePrompt }],
+          language, partner1: profile.partner1Name, partner2: profile.partner2Name,
+          posts: [], entries: []
+        })
+      });
+      const data = await resp.json();
+      // Prepend direct match count for clarity
+      const prefix = hasDirectMatches
+        ? (language === "zh" ? `🔍 找到 ${directMatches.length} 条相关记录\n\n` : `🔍 Found ${directMatches.length} matching records\n\n`)
+        : "";
+      setStreamMatchedPosts(directMatches);
+      setStreamSearchResult(prefix + data.reply);
+    } catch {
+      setStreamSearchResult(language === "zh" ? "搜索失败，请重试 🐾" : "Search failed, please retry 🐾");
+    } finally {
+      setIsStreamSearching(false);
+    }
   };
 
   const handleNextMonth = () => {
@@ -183,15 +267,20 @@ export default function TimelineTab({
 
   const handleCreateEvent = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newEventTitle.trim() || !newEventDate) return;
+    const computedDate = newEventType === "anniversary"
+      ? `${newEventMonth}-${newEventDay}`
+      : newEventDate;
+    if (!newEventTitle.trim() || !computedDate) return;
 
     const ev = {
       id: `event-${Date.now()}`,
       title: newEventTitle.trim(),
-      date: newEventDate,
+      date: computedDate,
       description: newEventDesc.trim() || "White lilies, coffee aroma and heartbeats aligned.",
       location: newEventLoc.trim() || undefined,
-      eventType: newEventType
+      eventType: newEventType,
+      likes: 0,
+      likedByUser: false
     };
 
     onUpdateEvents([...events, ev]);
@@ -202,31 +291,70 @@ export default function TimelineTab({
   };
 
   const handleDeleteEvent = (id: string) => {
-    onUpdatePosts(posts.filter(p => p.id !== id));
+    onUpdateEvents(events.filter(ev => ev.id !== id));
   };
 
-  const handleGetHighlight = async () => {
-    setAiHighlightLoading(true);
-    try {
-      const response = await fetch("/api/ai-summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "calendar",
-          items: events.map(e => ({ title: e.title, d: e.date, desc: e.description })),
-          language,
-          partner1: profile.partner1Name,
-          partner2: profile.partner2Name
-        }),
-      });
-      const data = await response.json();
-      setAiHighlight(data.summary);
-    } catch (error) {
-      console.error("AI memorial review failed", error);
-    } finally {
-      setAiHighlightLoading(false);
-    }
+  const handleToggleEventLike = (eventId: string) => {
+    const updated = events.map(ev => {
+      if (ev.id === eventId) {
+        const liked = !ev.likedByUser;
+        if (liked) {
+          audio.playHeart();
+          setLikeAnimEventId(eventId);
+          setTimeout(() => setLikeAnimEventId(null), 600);
+        } else {
+          audio.playTap();
+        }
+        return { ...ev, likedByUser: liked, likes: Math.max(0, (ev.likes || 0) + (liked ? 1 : -1)) };
+      }
+      return ev;
+    });
+    onUpdateEvents(updated);
   };
+
+  const handleAddPostComment = (postId: string) => {
+    const text = commentPostInputs[postId]?.trim();
+    const pendingMedia = commentPendingMedia[postId];
+    if (!text && !pendingMedia) return;
+    const newComment: Comment = {
+      id: `pc-${Date.now()}`,
+      author: profile.partner1Name,
+      avatar: profile.partner1Avatar || "",
+      content: text || "",
+      timestamp: new Date().toISOString(),
+      ...(pendingMedia ? { mediaUrl: pendingMedia.url, mediaType: pendingMedia.type } : {})
+    };
+    const updated = posts.map(p => p.id === postId ? { ...p, comments: [...p.comments, newComment] } : p);
+    onUpdatePosts(updated);
+    setCommentPostInputs(prev => ({ ...prev, [postId]: "" }));
+    setCommentPendingMedia(prev => { const n = { ...prev }; delete n[postId]; return n; });
+    audio.playTap();
+  };
+
+  const handleAddEventComment = (eventId: string) => {
+    const text = commentEventInputs[eventId]?.trim();
+    const pendingMedia = commentPendingMedia[eventId];
+    if (!text && !pendingMedia) return;
+    const newComment = {
+      id: `ec-${Date.now()}`,
+      author: profile.partner1Name,
+      content: text || "",
+      timestamp: new Date().toISOString(),
+      ...(pendingMedia ? { mediaUrl: pendingMedia.url, mediaType: pendingMedia.type } : {})
+    };
+    const updated = events.map(ev => {
+      if (ev.id === eventId) {
+        return { ...ev, comments: [...(ev.comments || []), newComment] };
+      }
+      return ev;
+    });
+    onUpdateEvents(updated);
+    setCommentEventInputs(prev => ({ ...prev, [eventId]: "" }));
+    setCommentPendingMedia(prev => { const n = { ...prev }; delete n[eventId]; return n; });
+    audio.playTap();
+  };
+
+
 
   const getMemoriesByDate = (dateStr: string) => {
     const postsMatching = posts.filter(p => p.timestamp?.startsWith(dateStr));
@@ -288,7 +416,20 @@ export default function TimelineTab({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [viewStyle, diaryBookIndex, posts?.length]);
-  
+
+  // Persist viewStyle to localStorage
+  useEffect(() => {
+    localStorage.setItem("couple_view_style", viewStyle);
+  }, [viewStyle]);
+
+  // Scroll-to-top visibility — only active in stream view
+  useEffect(() => {
+    if (viewStyle !== "stream") { setShowScrollTop(false); return; }
+    const handleScroll = () => setShowScrollTop(window.scrollY > 300);
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [viewStyle]);
+
   const [newPostContent, setNewPostContent] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -371,14 +512,15 @@ export default function TimelineTab({
   const [commentInputs, setCommentInputs] = useState<Record<string, string>>({});
   
   const [showAddForm, setShowAddForm] = useState(false); // Envelope publisher modal (#3)
+  const [isUploading, setIsUploading] = useState(false);
 
   // 1. Unified state variables for milestone configurations inside the single form
-  const [newPostDate, setNewPostDate] = useState("2026-06-12");
+  const [newPostDate, setNewPostDate] = useState(todayStr);
   const [newPostIsMilestone, setNewPostIsMilestone] = useState(false);
   const [newPostMilestoneType, setNewPostMilestoneType] = useState<"anniversary" | "birthday" | "custom">("custom");
   const [newPostMilestoneTitle, setNewPostMilestoneTitle] = useState("");
   const [newPostMilestoneLocation, setNewPostMilestoneLocation] = useState("");
-  const [retrospectiveDate, setRetrospectiveDate] = useState("2026-06-12");
+  const [retrospectiveDate, setRetrospectiveDate] = useState(todayStr);
 
   // Keep retroactive post date and selected grid cell in sync
   useEffect(() => {
@@ -409,12 +551,36 @@ export default function TimelineTab({
       eventType: p.milestoneType || "custom"
     }));
 
+  const prevTriggerRef = useRef(openAddTrigger ?? 0);
   useEffect(() => {
-    if (openAddTrigger && openAddTrigger > 0) {
-      // Both stream + calendar trigger the same envelope form!
+    const cur = openAddTrigger ?? 0;
+    // Only open when trigger strictly increases (prevents false-open on mount/tab-switch)
+    if (cur > prevTriggerRef.current) {
       setShowAddForm(true);
     }
+    prevTriggerRef.current = cur;
   }, [openAddTrigger]);
+
+  // Scroll to a specific post in stream view after AI search result click
+  useEffect(() => {
+    if (!scrollToPostId) return;
+    // Delay to let AnimatePresence exit animation finish (~300ms) before scrolling
+    const timer = setTimeout(() => {
+      const el = document.getElementById(`post-${scrollToPostId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.style.transition = "box-shadow 0.3s ease";
+        el.style.boxShadow = "0 0 0 3px #ad292f, 0 8px 30px rgba(173,41,47,0.25)";
+        setTimeout(() => {
+          el.style.boxShadow = "";
+          setScrollToPostId(null);
+        }, 2200);
+      } else {
+        setScrollToPostId(null);
+      }
+    }, 380);
+    return () => clearTimeout(timer);
+  }, [scrollToPostId]);
 
   const [aiSummary, setAiSummary] = useState<string>(() => {
     return language === "zh"
@@ -478,15 +644,26 @@ export default function TimelineTab({
   const handleGenerateRetrospective = async () => {
     setIsAiLoading(true);
     setAiSummary("");
-    
+
     // Filter posts for this month and day in history
     const d = new Date(retrospectiveDate);
     const m = d.getMonth();
     const dayVal = d.getDate();
-    
+    const retrospectiveMonth = m + 1; // 1-based
+    const mmdd = String(retrospectiveMonth).padStart(2, "0") + "-" + String(dayVal).padStart(2, "0");
+
     const historicalPosts = posts.filter(p => {
       const pDate = new Date(p.timestamp);
       return pDate.getMonth() === m && pDate.getDate() === dayVal;
+    });
+
+    // Also find anniversaries/events that occur on this month+day
+    const relevantEvents = events.filter(ev => {
+      if (/^\d{2}-\d{2}$/.test(ev.date)) {
+        return ev.date === mmdd;
+      }
+      const evDate = new Date(ev.date + "T12:00:00");
+      return evDate.getMonth() + 1 === retrospectiveMonth && evDate.getDate() === dayVal;
     });
 
     try {
@@ -499,6 +676,13 @@ export default function TimelineTab({
             author: p.author,
             content: p.content,
             date: p.timestamp?.slice(0, 10)
+          })),
+          events: relevantEvents.map(ev => ({
+            title: ev.title,
+            date: ev.date,
+            description: ev.description,
+            eventType: ev.eventType,
+            location: ev.location || ""
           })),
           language,
           partner1: profile.partner1Name,
@@ -515,24 +699,33 @@ export default function TimelineTab({
     }
   };
 
-  const handleToggleLike = (postId: string) => {
+  const [likeParticles, setLikeParticles] = useState<Array<{id: string; postId: string; x: number; y: number}>>([]);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [lightboxType, setLightboxType] = useState<"image" | "video">("image");
+
+  const handleToggleLike = (postId: string, e?: React.MouseEvent) => {
+    audio.playHeart();
+    // Likes are cumulative — always add, never subtract
     const updated = posts.map(p => {
       if (p.id === postId) {
-        const liked = !p.likedByUser;
-        return {
-          ...p,
-          likedByUser: liked,
-          likes: liked ? p.likes + 1 : Math.max(0, p.likes - 1)
-        };
+        return { ...p, likedByUser: true, likes: p.likes + 1 };
       }
       return p;
     });
     onUpdatePosts(updated);
+    // Spawn floating heart particle
+    if (e) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const particle = { id: `lp-${Date.now()}-${Math.random()}`, postId, x: rect.left + rect.width / 2, y: rect.top };
+      setLikeParticles(prev => [...prev, particle]);
+      setTimeout(() => setLikeParticles(prev => prev.filter(p => p.id !== particle.id)), 1200);
+    }
   };
 
   const handleAddComment = (postId: string) => {
     const text = commentInputs[postId]?.trim();
-    if (!text) return;
+    const pendingMedia = commentPendingMedia[postId];
+    if (!text && !pendingMedia) return;
 
     // Use current settings profile to assign commentator profile info
     const commentatorName = profile.partner1Name;
@@ -542,8 +735,9 @@ export default function TimelineTab({
       id: `comment-${Date.now()}`,
       author: commentatorName,
       avatar: commentatorAvatar,
-      content: text,
-      timestamp: new Date().toISOString()
+      content: text || "",
+      timestamp: new Date().toISOString(),
+      ...(pendingMedia ? { mediaUrl: pendingMedia.url, mediaType: pendingMedia.type } : {})
     };
 
     const updated = posts.map(p => {
@@ -558,13 +752,14 @@ export default function TimelineTab({
 
     onUpdatePosts(updated);
     setCommentInputs({ ...commentInputs, [postId]: "" });
+    setCommentPendingMedia(prev => { const n = { ...prev }; delete n[postId]; return n; });
   };
 
   const handleDeletePost = (postId: string) => {
     onUpdatePosts(posts.filter(p => p.id !== postId));
   };
 
-  const handleFileChange = (file: File) => {
+  const handleFileChange = async (file: File) => {
     if (!file) return;
     
     const isImage = file.type.startsWith("image/");
@@ -578,52 +773,67 @@ export default function TimelineTab({
     if (isImage) {
       const reader = new FileReader();
       reader.onload = (event) => {
+        const previewDataUrl = event.target?.result as string;
         const img = new window.Image();
-        img.onload = () => {
+        img.onload = async () => {
           const canvas = document.createElement("canvas");
           let width = img.width;
           let height = img.height;
-          
           const MAX_WIDTH = 900;
           const MAX_HEIGHT = 900;
           if (width > height) {
-            if (width > MAX_WIDTH) {
-              height *= MAX_WIDTH / width;
-              width = MAX_WIDTH;
-            }
+            if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
           } else {
-            if (height > MAX_HEIGHT) {
-              width *= MAX_HEIGHT / height;
-              height = MAX_HEIGHT;
-            }
+            if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
           }
           canvas.width = width;
           canvas.height = height;
           const ctx = canvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, width, height);
-            const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-            setNewPostImage(dataUrl);
-            setNewPostVideo("");
+          if (!ctx) { addMediaItem(previewDataUrl, "image", previewDataUrl); return; }
+          ctx.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+          if (file.size > 2 * 1024 * 1024) {
+            canvas.toBlob(async (blob) => {
+              if (!blob) { addMediaItem(dataUrl, "image", dataUrl); return; }
+              setIsUploading(true);
+              const fd = new FormData();
+              fd.append("file", new File([blob], "photo.jpg", { type: "image/jpeg" }));
+              try {
+                const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+                const d = await res.json();
+                addMediaItem(d.url, "image", dataUrl);
+              } catch {
+                addMediaItem(dataUrl, "image", dataUrl);
+              } finally {
+                setIsUploading(false);
+              }
+            }, "image/jpeg", 0.85);
           } else {
-            setNewPostImage(event.target?.result as string);
-            setNewPostVideo("");
+            addMediaItem(dataUrl, "image", dataUrl);
           }
         };
-        img.src = event.target?.result as string;
+        img.src = previewDataUrl;
       };
       reader.readAsDataURL(file);
     } else if (isVideo) {
-      if (file.size > 15 * 1024 * 1024) {
-        alert(language === 'zh' ? "视频文件较大，建议选择 15MB 以内的视频以获得流利的使用体验哦！" : "Videos larger than 15MB are recommended to be smaller for fluid browser speeds.");
+      setIsUploading(true);
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+        const d = await res.json();
+        addMediaItem(d.url, "video");
+      } catch {
+        addMediaItem(URL.createObjectURL(file), "video");
+      } finally {
+        setIsUploading(false);
       }
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setNewPostVideo(event.target?.result as string);
-        setNewPostImage("");
-      };
-      reader.readAsDataURL(file);
     }
+  };
+
+  // Helper: add a media item to the multi-media list
+  const addMediaItem = (url: string, type: "image" | "video", preview?: string) => {
+    setNewPostMediaItems(prev => [...prev, { url, type, preview }]);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -659,8 +869,8 @@ export default function TimelineTab({
       authorKey: newPostAuthor,
       avatar: currentAuthorAvatar,
       content: newPostContent.trim(),
-      imageUrl: newPostImage.trim() || undefined,
-      videoUrl: newPostVideo.trim() || undefined,
+      imageUrl: newPostMediaItems.find(m => m.type === "image")?.url || newPostImage.trim() || undefined,
+      videoUrl: newPostMediaItems.find(m => m.type === "video")?.url || newPostVideo.trim() || undefined,
       mood: newPostMood,
       likes: 0,
       likedByUser: false,
@@ -669,13 +879,15 @@ export default function TimelineTab({
       isMilestone: newPostIsMilestone,
       milestoneType: newPostIsMilestone ? newPostMilestoneType : undefined,
       milestoneTitle: newPostIsMilestone ? (newPostMilestoneTitle.trim() || newPostContent.slice(0, 20)) : undefined,
-      milestoneLocation: newPostIsMilestone ? (newPostMilestoneLocation.trim() || undefined) : undefined
+      milestoneLocation: newPostIsMilestone ? (newPostMilestoneLocation.trim() || undefined) : undefined,
+      mediaItems: newPostMediaItems.length > 1 ? newPostMediaItems.map(({url, type}) => ({url, type})) : undefined
     };
 
     onUpdatePosts([p, ...posts]);
     setNewPostContent("");
     setNewPostImage("");
     setNewPostVideo("");
+    setNewPostMediaItems([]);
     setNewPostIsMilestone(false);
     setNewPostMilestoneTitle("");
     setNewPostMilestoneLocation("");
@@ -687,390 +899,234 @@ export default function TimelineTab({
   };
 
   if (showAddForm) {
+    const moods = [
+      { emoji: "🥰", label: "浓情" },
+      { emoji: "😊", label: "欢喜" },
+      { emoji: "🍃", label: "恬静" },
+      { emoji: "🦊", label: "调皮" },
+      { emoji: "🐰", label: "想念" },
+    ];
     return (
-      <div className="space-y-6 pt-1 select-none">
-        {/* Header Block with custom return button */}
-        <div className="flex items-center justify-between pb-3.5 border-b border-rose-100 select-none">
+      <motion.div
+        initial={{ opacity: 0, y: 24 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="space-y-5 pt-1"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between">
           <button
             type="button"
-            onClick={() => {
-              audio.playTap();
-              setShowAddForm(false);
-            }}
-            className="flex items-center gap-1.5 text-xs font-black text-white bg-[#ad292f] hover:bg-[#ad292f]/95 px-4.5 py-2.5 rounded-full transition-all active:scale-95 cursor-pointer shadow-md shadow-rose-100"
+            onClick={() => { audio.playTap(); setShowAddForm(false); }}
+            className="flex items-center gap-1.5 text-xs font-bold text-[#ad292f] bg-rose-50 hover:bg-rose-100 px-4 py-2 rounded-full transition-all cursor-pointer"
           >
-            ← {language === "zh" ? "返回时光纪念册" : "Back to Moments"}
+            ← {language === "zh" ? "返回" : "Back"}
           </button>
-          
-          <div className="text-right">
-            <h2 className="font-serif text-lg font-black text-stone-855 tracking-tight leading-none">
-              {language === "zh" ? "写下新的时光纪念" : "New Memory Entry"}
-            </h2>
-            <span className="text-[9px] text-stone-400 font-mono font-bold tracking-widest block mt-1.5 uppercase">
-              {language === "zh" ? "第 1945 天的恋人口述" : "OUR CHRONICLE • RETROSPECTIVE"}
-            </span>
-          </div>
+          <h2 className="text-sm font-serif font-black text-stone-700">
+            {language === "zh" ? "✍️ 写下新时光" : "✍️ New Memory"}
+          </h2>
+          <div className="w-16" />
         </div>
 
-        {/* The beautiful publisher Card */}
-        <div 
-          className="bg-[#fefcf8] border-4 border-rose-100/30 rounded-[32px] p-6 sm:p-8 shadow-xl relative"
-          style={{
-            backgroundImage: "radial-gradient(#dfd7d7 0.7px, transparent 0.7px)",
-            backgroundSize: "20px 20px"
-          }}
-        >
-          {/* Envelope Red Ribbon header lines */}
-          <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-red-650 via-white to-red-650 rounded-t-3xl bg-[length:25px_100%]" />
+        {/* Lightbox for add form media preview */}
+        <AnimatePresence>
+          {lightboxUrl && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/80 z-[200] flex items-center justify-center p-4"
+              onClick={() => setLightboxUrl(null)}
+            >
+              <button className="absolute top-4 right-4 text-white/70 hover:text-white p-2" onClick={() => setLightboxUrl(null)}>
+                <X size={24} />
+              </button>
+              {lightboxType === "video" ? (
+                <video src={lightboxUrl} controls autoPlay className="max-w-full max-h-[80vh] rounded-2xl" onClick={(e) => e.stopPropagation()} />
+              ) : (
+                <img src={lightboxUrl} className="max-w-full max-h-[80vh] rounded-2xl object-contain" alt="" onClick={(e) => e.stopPropagation()} />
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-          {/* Decorative Stamp on the Right Top */}
-          <div className="absolute top-6 right-6 w-20 h-24 border border-dashed border-[#ad292f]/50 p-1 bg-[#fffaf5] rotate-[4deg] shadow-xs hidden sm:block">
-            <div className="w-full h-full bg-[#fae8e8] rounded-xs flex flex-col items-center justify-center relative border border-rose-250">
-              <Stamp size={18} className="text-[#ad292f]/60" />
-              <Heart size={10} fill="#ad292f" className="text-[#ad292f] absolute top-1 right-1" />
-              <span className="text-[7px] font-bold text-gray-500 tracking-tighter uppercase mt-2">{t.letterStamp}</span>
-              <span className="text-[8px] font-mono font-bold text-[#ad292f] mt-1">$ 13.14</span>
-            </div>
+        <form
+          onSubmit={(e) => { audio.playSuccess(); handleCreatePost(e); }}
+          className="bg-white rounded-3xl border border-rose-100/60 p-5 shadow-sm space-y-5"
+        >
+          {/* 1. Author selector */}
+          <div className="grid grid-cols-2 gap-2.5">
+            {(["partner1", "partner2"] as const).map((key) => {
+              const name = key === "partner1" ? profile.partner1Name : profile.partner2Name;
+              const avatar = key === "partner1" ? profile.partner1Avatar : profile.partner2Avatar;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => { audio.playTap(); setNewPostAuthor(key); }}
+                  className={`flex items-center gap-2.5 p-3 rounded-2xl border-2 font-bold text-sm transition-all cursor-pointer ${
+                    newPostAuthor === key
+                      ? "border-[#ad292f] bg-rose-50 text-[#ad292f]"
+                      : "border-stone-100 bg-white text-stone-500 hover:bg-stone-50"
+                  }`}
+                >
+                  <img src={avatar} className="w-7 h-7 rounded-full object-cover ring-2 ring-white" alt="" referrerPolicy="no-referrer" />
+                  <span className="text-xs truncate">{name}</span>
+                </button>
+              );
+            })}
           </div>
 
-          <form onSubmit={(e) => {
-            audio.playSuccess();
-            handleCreatePost(e);
-          }} className="space-y-6 pt-4 select-none relative z-10">
-            <div className="border-b border-[#ad292f]/15 pb-4">
-              <span className="text-[9px] uppercase font-black tracking-widest text-[#ad292f] block mb-1">
-                MEMORIES & PLEDGES ARCHIVE
-              </span>
-              <h3 className="text-xl font-serif font-black text-gray-800 flex items-center gap-1.5">
-                {t.letterTitle}
-              </h3>
-            </div>
-
-            {/* Form Fields: Author Option */}
-            <div className="space-y-2">
-              <label className="block text-[11px] font-bold text-[#735858] uppercase tracking-wider">
-                {t.authorLabel} • {language === "zh" ? "是谁记录的？" : "Who is writing?"}
-              </label>
-              <div className="grid grid-cols-2 gap-3 font-semibold text-xs text-stone-750">
-                <button
-                  type="button"
-                  onClick={() => {
-                    audio.playTap();
-                    setNewPostAuthor("partner1");
-                  }}
-                  className={`p-3 rounded-2xl font-bold flex items-center gap-3 justify-center border-2 transition-all cursor-pointer ${
-                    newPostAuthor === "partner1"
-                      ? "border-[#ad292f] bg-[#fceae9] text-[#ad292f] scale-[1.01] shadow-xs"
-                      : "border-stone-150 hover:bg-stone-50 text-stone-500 bg-white/40"
-                  }`}
-                >
-                  <img src={profile.partner1Avatar} className="w-6 h-6 rounded-full object-cover ring-2 ring-white" alt="" referrerPolicy="no-referrer" />
-                  <span>{profile.partner1Name}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    audio.playTap();
-                    setNewPostAuthor("partner2");
-                  }}
-                  className={`p-3 rounded-2xl font-bold flex items-center gap-3 justify-center border-2 transition-all cursor-pointer ${
-                    newPostAuthor === "partner2"
-                      ? "border-[#ad292f] bg-[#fceae9] text-[#ad292f] scale-[1.01] shadow-xs"
-                      : "border-stone-150 hover:bg-stone-50 text-stone-500 bg-white/40"
-                  }`}
-                >
-                  <img src={profile.partner2Avatar} className="w-6 h-6 rounded-full object-cover ring-2 ring-white" alt="" referrerPolicy="no-referrer" />
-                  <span>{profile.partner2Name}</span>
-                </button>
+          {/* 2. Content textarea with mic button */}
+          <div className="relative">
+            <textarea
+              value={newPostContent}
+              onChange={(e) => setNewPostContent(e.target.value)}
+              placeholder={language === "zh" ? "写下你和 Ta 的温暖瞬间… ☕" : "Write down a cozy moment shared with your love..."}
+              rows={4}
+              required
+              className="w-full text-sm p-4 pr-12 border border-rose-100/60 rounded-2xl bg-rose-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-rose-200 resize-none font-serif text-stone-700 leading-relaxed"
+            />
+            <button
+              type="button"
+              onClick={() => { audio.playTap(); toggleListening(); }}
+              className={`absolute right-2 top-2 flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-bold transition-all cursor-pointer select-none ${
+                isListening
+                  ? "bg-[#ad292f] text-white animate-pulse shadow-md shadow-rose-200"
+                  : "bg-rose-100 text-[#ad292f] hover:bg-rose-200"
+              }`}
+              title={language === "zh" ? (isListening ? "停止录音" : "语音输入") : (isListening ? "Stop" : "Voice input")}
+            >
+              {isListening ? <MicOff size={12} className="shrink-0" /> : <Mic size={12} className="shrink-0" />}
+              <span>{isListening ? (language === "zh" ? "停止" : "Stop") : (language === "zh" ? "语音" : "Voice")}</span>
+            </button>
+            {isListening && (
+              <div className="absolute bottom-3 left-4 flex items-center gap-1.5 text-[10px] text-[#ad292f] font-bold animate-pulse">
+                <span className="w-1.5 h-1.5 bg-[#ad292f] rounded-full animate-ping" />
+                {language === "zh" ? "正在聆听…" : "Listening…"}
               </div>
-            </div>
+            )}
+            {speechError && (
+              <p className="text-[10px] text-rose-600 font-bold mt-1 px-1">⚠️ {speechError}</p>
+            )}
+          </div>
 
-            {/* Sub row - Mood & Photograph Link */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="block text-[11px] font-bold text-[#735858] uppercase tracking-wider">
-                  {t.moodLabel}
-                </label>
-                <select
-                  value={newPostMood}
-                  onChange={(e) => {
-                    audio.playTap();
-                    setNewPostMood(e.target.value);
-                  }}
-                  className="w-full text-xs p-3.5 border border-stone-200 rounded-2xl bg-white focus:border-[#ad292f] outline-none font-bold text-gray-700"
-                >
-                  <option value="In Love">🥰 浓情蜜意 (In Love)</option>
-                  <option value="Happy">😊 欢欣鼓舞 (Happy)</option>
-                  <option value="Peaceful">🍃 恬静和美 (Peaceful)</option>
-                  <option value="Playful">🦊 调皮搞怪 (Playful)</option>
-                  <option value="Miss You">🐰 疯狂想念 (Miss You)</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5 font-sans">
-                <label className="block text-[11px] font-bold text-[#735858] uppercase tracking-wider">
-                  {language === "zh" ? "定格瞬间 (系统照片/视频)" : "Snapshot (System Photos/Videos)"}
-                </label>
-                <div
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
-                  onClick={() => {
-                    audio.playTap();
-                    document.getElementById("media-file-input")?.click();
-                  }}
-                  className={`relative border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-all flex flex-col items-center justify-center min-h-[110px] ${
-                    isDragging
-                      ? "border-[#ad292f] bg-[#fceae9]/50"
-                      : (newPostImage || newPostVideo)
-                      ? "border-emerald-300 bg-emerald-50/20"
-                      : "border-stone-200 hover:border-[#ad292f]"
-                  }`}
-                >
-                  <input
-                    id="media-file-input"
-                    type="file"
-                    accept="image/*,video/*"
-                    onChange={(e) => {
-                      if (e.target.files && e.target.files[0]) {
-                        handleFileChange(e.target.files[0]);
-                      }
-                    }}
-                    className="hidden"
-                  />
-
-                  {/* Preview selected media */}
-                  {newPostImage ? (
-                    <div className="relative group w-full flex items-center justify-between bg-white/90 p-2 rounded-xl border border-rose-100">
-                      <div className="flex items-center gap-2">
-                        <img src={newPostImage} className="w-14 h-10 object-cover rounded-lg border border-gray-100" />
-                        <div className="text-left font-sans font-semibold">
-                          <p className="text-[10px] font-bold text-gray-800">📸 {language === "zh" ? "照片已选择" : "Photo Selected"}</p>
-                          <p className="text-[9px] text-gray-400 font-medium">{language === "zh" ? "已智能压缩" : "Compressed"}</p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          audio.playTap();
-                          setNewPostImage("");
-                        }}
-                        className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg cursor-pointer"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ) : newPostVideo ? (
-                    <div className="relative group w-full flex items-center justify-between bg-white/90 p-2 rounded-xl border border-rose-100">
-                      <div className="flex items-center gap-2">
-                        <div className="w-14 h-10 bg-black rounded-lg flex items-center justify-center overflow-hidden">
-                          <video src={newPostVideo} className="w-full h-full object-cover" muted />
-                        </div>
-                        <div className="text-left font-sans font-semibold font-bold">
-                          <p className="text-[10px] font-bold text-gray-800">🎥 {language === "zh" ? "视频已选择" : "Video Selected"}</p>
-                          <p className="text-[9px] text-gray-400 font-medium">{language === "zh" ? "已就绪" : "Ready"}</p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          audio.playTap();
-                          setNewPostVideo("");
-                        }}
-                        className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg cursor-pointer"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="space-y-1.5 pointer-events-none font-sans">
-                      <div className="mx-auto w-7 h-7 rounded-full bg-rose-50 text-[#ad292f] flex items-center justify-center">
-                        <ImageIcon size={14} />
-                      </div>
-                      <div className="space-y-0.5 font-sans">
-                        <p className="text-[10px] font-bold text-gray-700">
-                          {language === "zh" ? "点此选择或拖入本地照片/视频" : "Click to select or drag photo/video"}
-                        </p>
-                        <p className="text-[9px] text-gray-400 font-medium leading-normal max-w-[200px] mx-auto">
-                          {language === "zh" ? "支持直接获取系统图库" : "Acquire directly from library"}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Unified Date Selection option */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="block text-[11px] font-bold text-[#735858] uppercase tracking-wider">
-                  {language === "zh" ? "纪念时间" : "Memory Date"}
-                </label>
-                <input
-                  type="date"
-                  value={newPostDate}
-                  onChange={(e) => setNewPostDate(e.target.value)}
-                  className="w-full text-xs p-3.5 border border-stone-200 rounded-2xl bg-[#FAF8F5]/80 focus:border-[#ad292f] outline-none font-bold text-stone-700 focus:bg-white transition-all text-stone-750"
-                />
-              </div>
-              
-              <div className="space-y-2 flex flex-col justify-end pb-3">
-                <label className="flex items-center gap-2 text-xs font-bold text-stone-700 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={newPostIsMilestone}
-                    onChange={(e) => {
-                      audio.playTap();
-                      setNewPostIsMilestone(e.target.checked);
-                    }}
-                    className="rounded text-[#ad292f] focus:ring-[#ad292f] border-stone-300 w-4 h-4 cursor-pointer"
-                  />
-                  <span className="text-[#ad292f] flex items-center gap-1 font-black">
-                    💖 {language === "zh" ? "设为纪念里程碑/誓约" : "Love Milestone / Pledge"}
-                  </span>
-                </label>
-              </div>
-            </div>
-
-            {/* MileStone details */}
-            <AnimatePresence>
-              {newPostIsMilestone && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="space-y-4 border-l-4 border-rose-300 pl-4 bg-rose-50/20 p-4 rounded-r-2xl"
-                >
-                  <p className="text-[10px] text-rose-800 font-bold uppercase tracking-wider">
-                    🎉 {language === "zh" ? "完善里程碑信息（写进浪漫大事记）" : "Complete Milestone Details"}
-                  </p>
-                  
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-xs">
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-stone-400">
-                        {language === "zh" ? "里程碑主题/誓言 (e.g. 第一次看海)" : "Milestone Topic"}
-                      </label>
-                      <input
-                        type="text"
-                        placeholder={language === "zh" ? "如：第一次看星空" : "First sunset together..."}
-                        value={newPostMilestoneTitle}
-                        onChange={(e) => setNewPostMilestoneTitle(e.target.value)}
-                        className="w-full p-2.5 border border-stone-200 rounded-xl bg-white"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-stone-400">
-                        {language === "zh" ? "定情地点/发生地" : "Location"}
-                      </label>
-                      <input
-                        type="text"
-                        placeholder={language === "zh" ? "如：三亚椰子湾" : "Beach city..."}
-                        value={newPostMilestoneLocation}
-                        onChange={(e) => setNewPostMilestoneLocation(e.target.value)}
-                        className="w-full p-2.5 border border-stone-200 rounded-xl bg-white"
-                      />
+          {/* 3. Photo/Video upload — supports multiple files */}
+          <div className="space-y-2">
+            {/* Existing single media (legacy) + new multi-media thumbnails */}
+            {(newPostImage || newPostVideo || newPostMediaItems.length > 0) && (
+              <div className="grid grid-cols-3 gap-2">
+                {newPostImage && (
+                  <div className="relative group rounded-xl overflow-hidden h-20 bg-gray-100">
+                    <img src={newPostImage} className="w-full h-full object-cover" alt="" />
+                    <button type="button" onClick={() => setNewPostImage("")} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
+                  </div>
+                )}
+                {newPostVideo && (
+                  <div className="relative group rounded-xl overflow-hidden h-20 bg-black flex items-center justify-center">
+                    <span className="text-2xl">🎥</span>
+                    <button type="button" onClick={() => setNewPostVideo("")} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
+                  </div>
+                )}
+                {newPostMediaItems.map((item, idx) => (
+                  <div key={idx} className="relative group rounded-xl overflow-hidden h-20 bg-gray-100 cursor-zoom-in"
+                    onClick={() => { setLightboxUrl(item.preview || item.url); setLightboxType(item.type); }}
+                  >
+                    {item.type === "image" ? (
+                      <img src={item.preview || item.url} className="w-full h-full object-cover" alt="" />
+                    ) : (
+                      <div className="w-full h-full bg-black flex items-center justify-center"><span className="text-2xl">🎥</span></div>
+                    )}
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setNewPostMediaItems(prev => prev.filter((_, i) => i !== idx)); }} className="absolute top-1 right-1 bg-[#ad292f] text-white rounded-full p-1 shadow-md"><X size={9} /></button>
+                    <div className="absolute bottom-1 left-1 bg-black/40 text-white text-[8px] rounded px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity font-bold">
+                      {language === "zh" ? "点击预览" : "Preview"}
                     </div>
                   </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Voice dictate text input heart line ruled textarea */}
-            <div className="space-y-2 font-sans">
-              <div className="flex items-center justify-between">
-                <label className="block text-[11px] font-bold text-[#735858] uppercase tracking-wider">
-                  {language === "zh" ? "写下今日纪念" : "Type your moment"}
-                </label>
-                
-                {/* Voice Dictation Switch button */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    audio.playTap();
-                    toggleListening();
-                  }}
-                  className={`flex items-center gap-1.5 text-[10px] px-3 py-1.5 rounded-full font-bold select-none transition-all cursor-pointer ${
-                    isListening
-                      ? "bg-rose-500 text-white animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.4)]"
-                      : "bg-rose-50 text-[#ad292f] hover:bg-rose-100"
-                  }`}
-                >
-                  {isListening ? (
-                    <>
-                      <span className="w-1.5 h-1.5 bg-white rounded-full animate-ping" />
-                      <MicOff size={11} className="shrink-0" />
-                      <span>{language === "zh" ? "说完了 (点击停止)" : "Done (Click to stop)"}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Mic size={11} className="shrink-0 text-[#ad292f]" />
-                      <span>{language === "zh" ? "麦克风快速录入" : "Speech to Text"}</span>
-                    </>
-                  )}
-                </button>
+                ))}
               </div>
-
-              {speechError && (
-                <p className="text-[10px] text-rose-500 font-semibold bg-rose-50/50 px-2.5 py-1.5 rounded-xl">
-                  ⚠️ {speechError}
-                </p>
-              )}
-
-              {isListening && (
-                <div className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-50/30 border border-rose-100 rounded-xl text-[10px] text-stone-500 font-sans font-semibold">
-                  <span className="flex gap-0.5">
-                    <span className="w-1 h-3 bg-[#ad292f] rounded-full animate-bounce" style={{ animationDelay: "0.1s" }} />
-                    <span className="w-1 h-4 bg-rose-500 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }} />
-                    <span className="w-1 h-3 bg-[#ad292f] rounded-full animate-bounce" style={{ animationDelay: "0.3s" }} />
-                  </span>
-                  <span>{language === "zh" ? "倾听中：请说出您的温柔碎碎念，系统将自动追加为文字..." : "Listening: Speak, we will capture your warm words in real time..."}</span>
+            )}
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => { audio.playTap(); document.getElementById("simple-media-input")?.click(); }}
+              className={`relative border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-all ${
+                isDragging ? "border-[#ad292f] bg-rose-50/30" : "border-rose-100 hover:border-[#ad292f]/40 bg-rose-50/10"
+              }`}
+            >
+              <input
+                id="simple-media-input"
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                className="hidden"
+                onChange={async (e) => {
+                  const files = Array.from(e.target.files || []) as File[];
+                  if (!files.length) return;
+                  for (const file of files) {
+                    await handleFileChange(file);
+                  }
+                  e.target.value = "";
+                }}
+              />
+              {isUploading ? (
+                <div className="flex items-center justify-center gap-2 text-xs font-bold text-[#ad292f] animate-pulse">
+                  <div className="w-3 h-3 border-2 border-[#ad292f] border-t-transparent rounded-full animate-spin" />
+                  {language === "zh" ? "上传中..." : "Uploading..."}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center gap-2 text-xs font-medium text-stone-400">
+                  <Image size={16} className="text-[#ad292f]/50" />
+                  <span>{language === "zh" ? "点击或拖拽添加照片/视频（支持多个）" : "Click or drag photos/videos (multiple ok)"}</span>
                 </div>
               )}
-
-              <textarea
-                placeholder={t.postPlaceholder}
-                value={newPostContent}
-                onChange={(e) => setNewPostContent(e.target.value)}
-                rows={6}
-                className="w-full text-sm p-4 border border-rose-100 rounded-2xl bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-rose-200 text-[#735858] font-medium leading-relaxed font-sans"
-                required
-              />
             </div>
+          </div>
 
-            {/* Footer Form submission actions */}
-            <div className="flex justify-between items-center pt-3 gap-4 font-sans font-semibold">
-              <p className="text-[9.5px] text-stone-400 font-serif italic max-w-xs leading-tight hidden sm:block">
-                Your letters are local-safe and compiled with cryptographic warmth 🔒
-              </p>
-              <div className="flex gap-2 w-full sm:w-auto text-xs font-bold font-sans">
-                <button
-                  type="button"
-                  onClick={() => {
-                    audio.playTap();
-                    setShowAddForm(false);
-                  }}
-                  className="px-5 py-3 text-stone-500 bg-stone-100 hover:bg-stone-200 rounded-xl transition-all cursor-pointer font-sans"
-                >
-                  {language === "zh" ? "取消" : "Cancel"}
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 sm:flex-none bg-[#ad292f] hover:bg-[#ad292f]/95 text-white px-7 py-3 rounded-xl font-bold hover:scale-[1.01] active:scale-99 transition-all cursor-pointer flex items-center justify-center gap-1.5 font-sans"
-                >
-                  <Feather size={14} />
-                  {t.shareBtn}
-                </button>
-              </div>
+          {/* 4. Mood chips */}
+          <div>
+            <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2">{language === "zh" ? "此刻心情" : "Mood"}</p>
+            <div className="flex flex-wrap gap-2">
+              {moods.map((m) => {
+                const chipVal = m.emoji + " " + m.label;
+                const isSelected = newPostMood === chipVal;
+                return (
+                  <button
+                    key={m.emoji}
+                    type="button"
+                    onClick={() => { audio.playTap(); setNewPostMood(chipVal); }}
+                    className={`flex items-center gap-1 text-xs font-bold px-3 py-1.5 rounded-full border transition-all cursor-pointer ${
+                      isSelected
+                        ? "border-[#ad292f] bg-rose-50 text-[#ad292f]"
+                        : "border-stone-200 bg-white text-stone-500 hover:border-rose-200"
+                    }`}
+                  >
+                    {m.emoji} {m.label}
+                  </button>
+                );
+              })}
             </div>
-          </form>
-        </div>
-      </div>
+            {/* Custom mood free text */}
+            <input
+              type="text"
+              value={moods.some(m => newPostMood === m.emoji + " " + m.label) ? "" : newPostMood}
+              onChange={(e) => setNewPostMood(e.target.value)}
+              placeholder={language === "zh" ? "✏️ 或输入自定义心情…" : "✏️ Or type a custom mood…"}
+              className="mt-2 w-full text-xs p-2.5 border border-rose-100/80 rounded-xl bg-rose-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-rose-200 text-stone-600 font-medium placeholder:text-stone-300"
+            />
+          </div>
+
+          {/* Submit */}
+          <button
+            type="submit"
+            className="w-full bg-[#ad292f] hover:bg-[#ad292f]/90 text-white py-3.5 rounded-2xl text-sm font-black shadow-md shadow-rose-100 transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2"
+          >
+            <Heart size={16} fill="white" />
+            {language === "zh" ? "落笔留香 💖" : "Publish to Eternity 💖"}
+          </button>
+        </form>
+      </motion.div>
     );
   }
-
   return (
     <div className="space-y-6 pt-1">
       {/* Custom Dynamic Success Notification Box */}
@@ -1578,17 +1634,23 @@ export default function TimelineTab({
         )}
       </AnimatePresence>
 
-      {/* Calendar add event popup portal layout */}
+      {/* Calendar add event popup portal layout — bottom-sheet */}
       <AnimatePresence>
         {showAddEventForm && (
-          <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-xs z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-stone-900/40 backdrop-blur-xs z-[100] flex items-end"
+            onClick={() => setShowAddEventForm(false)}
+          >
             <motion.form
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.96 }}
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
               onSubmit={handleCreateEvent}
-              className="bg-white border text-stone-700 border-rose-100 p-6 rounded-[28px] shadow-2xl space-y-4 select-none max-w-xl w-full max-h-[90vh] overflow-y-auto"
+              className="bg-white border text-stone-700 border-rose-100 p-6 rounded-t-3xl shadow-2xl space-y-4 select-none w-full max-w-2xl mx-auto max-h-[90vh] overflow-y-auto"
             >
+              <div className="w-10 h-1 bg-stone-200 rounded-full mx-auto -mt-1 mb-1" />
               <div className="flex justify-between items-center pb-2 border-b border-rose-100/30">
                 <h3 className="font-serif font-black text-[#ad292f] text-lg flex items-center gap-1.5">
                   <CalendarIcon size={18} />
@@ -1621,13 +1683,36 @@ export default function TimelineTab({
                   <label className="block text-[#735858]/80 uppercase tracking-widest text-[10px]">
                     {calendarT.dateLabel}
                   </label>
-                  <input
-                    type="date"
-                    value={newEventDate}
-                    onChange={(e) => setNewEventDate(e.target.value)}
-                    className="w-full p-2.5 border border-gray-200 rounded-xl text-[#735858] bg-gray-50/50 focus:bg-white focus:ring-1 focus:ring-rose-200"
-                    required
-                  />
+                  {newEventType === "anniversary" ? (
+                    <div className="flex gap-2">
+                      <select
+                        value={newEventMonth}
+                        onChange={(e) => setNewEventMonth(e.target.value)}
+                        className="flex-1 p-2.5 border border-gray-200 rounded-xl bg-gray-50/50 focus:bg-white text-gray-700 focus:ring-1 focus:ring-rose-200"
+                      >
+                        {["01","02","03","04","05","06","07","08","09","10","11","12"].map(m => (
+                          <option key={m} value={m}>{m}{language === "zh" ? "月" : ""}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={newEventDay}
+                        onChange={(e) => setNewEventDay(e.target.value)}
+                        className="flex-1 p-2.5 border border-gray-200 rounded-xl bg-gray-50/50 focus:bg-white text-gray-700 focus:ring-1 focus:ring-rose-200"
+                      >
+                        {Array.from({length: 31}, (_, i) => String(i + 1).padStart(2, "0")).map(d => (
+                          <option key={d} value={d}>{d}{language === "zh" ? "日" : ""}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <input
+                      type="date"
+                      value={newEventDate}
+                      onChange={(e) => setNewEventDate(e.target.value)}
+                      className="w-full p-2.5 border border-gray-200 rounded-xl text-[#735858] bg-gray-50/50 focus:bg-white focus:ring-1 focus:ring-rose-200"
+                      required
+                    />
+                  )}
                 </div>
               </div>
 
@@ -1739,7 +1824,7 @@ export default function TimelineTab({
                   return <div key={index} className="text-transparent p-2">_</div>;
                 }
 
-                // Cross reference events
+                // Cross reference milestone posts
                 const hasMilestoneEvents = calendarEvents.filter((e) => {
                   const evDate = new Date(e.date);
                   return (
@@ -1749,11 +1834,36 @@ export default function TimelineTab({
                   );
                 });
 
+                // Also check standalone events from couple_events localStorage
+                const hasStandaloneEvents = events.filter((ev) => {
+                  // MM-DD recurring format: match by month+day every year
+                  if (/^\d{2}-\d{2}$/.test(ev.date)) {
+                    const [evMM, evDD] = ev.date.split("-").map(Number);
+                    return evDD === cell.day && evMM - 1 === currentMonth;
+                  }
+                  const evDate = new Date(ev.date + "T12:00:00");
+                  // Anniversary type with full date: also show every year on same month+day
+                  if (ev.eventType === "anniversary") {
+                    return evDate.getDate() === cell.day && evDate.getMonth() === currentMonth;
+                  }
+                  // Birthday: show every year
+                  if (ev.eventType === "birthday") {
+                    return evDate.getDate() === cell.day && evDate.getMonth() === currentMonth;
+                  }
+                  // Custom / one-time: exact date match only
+                  return (
+                    evDate.getDate() === cell.day &&
+                    evDate.getMonth() === currentMonth &&
+                    evDate.getFullYear() === currentYear
+                  );
+                });
+
                 const { postsMatching } = getMemoriesByDate(cell.fullDate);
                 const totalPublishedRecords = postsMatching.length;
+                const allEventsOnDay = [...hasMilestoneEvents, ...hasStandaloneEvents];
 
-                const isAnniversary = hasMilestoneEvents.some(e => e.eventType === "anniversary");
-                const isBirthday = hasMilestoneEvents.some(e => e.eventType === "birthday");
+                const isAnniversary = allEventsOnDay.some(e => e.eventType === "anniversary");
+                const isBirthday = allEventsOnDay.some(e => e.eventType === "birthday");
                 const isSelected = selectedDate === cell.fullDate;
 
                 return (
@@ -1771,14 +1881,14 @@ export default function TimelineTab({
                     <span className="relative z-10">{cell.day}</span>
                     
                     {/* Visual badges for events */}
-                    {hasMilestoneEvents.length > 0 && !isSelected && (
+                    {allEventsOnDay.length > 0 && !isSelected && (
                       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                         {isAnniversary ? (
-                          <Heart size={28} className="text-[#ad292f]/10" fill="#ad292f" />
+                          <Heart size={22} className="text-[#ad292f]/20" fill="currentColor" style={{opacity: 0.12}} />
                         ) : isBirthday ? (
-                          <Cake size={28} className="text-amber-500/10" />
+                          <Cake size={22} className="text-amber-400/20" style={{opacity: 0.15}} />
                         ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute bottom-1"></span>
+                          <span className="w-1 h-1 rounded-full bg-emerald-300 absolute bottom-1 opacity-60"></span>
                         )}
                       </div>
                     )}
@@ -1798,138 +1908,367 @@ export default function TimelineTab({
             </div>
           </section>
 
-          {/* DYNAMIC RETRO DRAWER MODULE: Memories of Clicked Day */}
-          <AnimatePresence>
-            {selectedDate && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                className="overflow-hidden bg-[#fffdfa] border border-amber-900/15 rounded-[24px] p-5 shadow-inner space-y-4"
+          {/* Two-tab list: 时光记录 | 纪念日 */}
+          <section className="space-y-3 select-none">
+            <div className="flex items-center justify-between gap-2">
+              {/* Tab switcher */}
+              <div className="flex items-center gap-0.5 bg-stone-100/60 p-1 rounded-2xl border border-stone-100/40">
+                <button
+                  type="button"
+                  onClick={() => setCalendarListTab("records")}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-xl transition-all cursor-pointer ${
+                    calendarListTab === "records"
+                      ? "bg-white text-[#ad292f] shadow-sm"
+                      : "text-stone-500 hover:text-stone-700"
+                  }`}
+                >
+                  {language === "zh" ? "📝 时光记录" : "📝 Moments"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCalendarListTab("anniversaries")}
+                  className={`flex items-center gap-1 text-[10px] font-bold px-3 py-1.5 rounded-xl transition-all cursor-pointer ${
+                    calendarListTab === "anniversaries"
+                      ? "bg-white text-[#ad292f] shadow-sm"
+                      : "text-stone-500 hover:text-stone-700"
+                  }`}
+                >
+                  <Heart size={9} fill={calendarListTab === "anniversaries" ? "#ad292f" : "none"} className={calendarListTab === "anniversaries" ? "text-[#ad292f]" : "text-stone-400"} />
+                  {language === "zh" ? "纪念日" : "Anniversaries"}
+                </button>
+              </div>
+              {/* 新增纪念日 */}
+              <button
+                type="button"
+                onClick={() => setShowAddEventForm(true)}
+                className="flex items-center gap-1 text-[10px] font-bold text-[#ad292f] bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-full border border-rose-100 transition-all cursor-pointer shrink-0"
               >
-                <div className="flex justify-between items-center pb-2 border-b border-amber-100">
-                  <div className="flex items-center gap-2 select-none">
-                    <BookOpen size={16} className="text-[#ad292f]" />
-                    <h4 className="text-sm font-black text-[#ad292f] font-serif">
-                      {selectedDate} • {calendarT.dayMemoryTitle}
-                    </h4>
-                  </div>
-                  <button
-                    onClick={() => setSelectedDate(null)}
-                    className="text-xs text-gray-500 hover:text-gray-700 font-bold bg-[#fbf5ee] px-3 py-1 rounded-full border border-amber-900/10 transition-colors cursor-pointer"
-                  >
-                    {calendarT.backToAll}
+                <Plus size={11} />
+                {language === "zh" ? "新增纪念日" : "Add Event"}
+              </button>
+            </div>
+
+            {/* Selected date filter badge */}
+            {selectedDate && (
+              <div className="flex items-center gap-2 px-1">
+                <span className="text-[10px] font-bold text-[#ad292f] bg-rose-50 px-2.5 py-1 rounded-full border border-rose-100 flex items-center gap-1.5">
+                  📅 {new Date(selectedDate + "T12:00:00").toLocaleDateString(language === "zh" ? "zh-CN" : "en-US", { month: "short", day: "numeric" })}
+                  <button onClick={() => setSelectedDate(null)} className="text-rose-400 hover:text-rose-600 ml-0.5 cursor-pointer">
+                    <X size={9} />
                   </button>
-                </div>
+                </span>
+                <span className="text-[9px] text-stone-400">{language === "zh" ? "仅显示当天记录" : "Showing this day only"}</span>
+              </div>
+            )}
 
+            <AnimatePresence mode="wait">
+              {calendarListTab === "records" ? (
+                <motion.div key="records" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 {(() => {
-                  const { postsMatching } = getMemoriesByDate(selectedDate);
-                  const totalItems = postsMatching.length;
-
-                  if (totalItems === 0) {
+                  // Filter by selected date if any
+                  const allSorted = [...posts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                  const sortedPosts = selectedDate
+                    ? allSorted.filter(p => p.timestamp.slice(0, 10) === selectedDate)
+                    : allSorted;
+                  if (sortedPosts.length === 0) {
                     return (
-                      <p className="text-xs italic text-gray-400 select-none py-3">
-                        {calendarT.noMemoryForDay}
-                      </p>
+                      <div className="text-center py-8 space-y-2">
+                        <div className="text-xs text-gray-400 font-medium italic">
+                          {selectedDate
+                            ? (language === "zh" ? `${selectedDate} 这天还没有记录 ✨` : `No records on ${selectedDate} ✨`)
+                            : (language === "zh" ? "还没有时光记录 ✨" : "No moments yet ✨")}
+                        </div>
+                        {selectedDate && (
+                          <button onClick={() => setSelectedDate(null)} className="text-[10px] font-bold text-[#ad292f] bg-rose-50 px-3 py-1 rounded-full border border-rose-100 cursor-pointer">
+                            {language === "zh" ? "查看全部记录" : "View all records"}
+                          </button>
+                        )}
+                      </div>
                     );
                   }
-
+                  const grouped: Record<string, typeof posts> = {};
+                  sortedPosts.forEach(p => {
+                    const d = p.timestamp.slice(0, 10);
+                    if (!grouped[d]) grouped[d] = [];
+                    grouped[d].push(p);
+                  });
                   return (
-                    <div className="space-y-4 max-h-80 overflow-y-auto pr-1">
-                      {postsMatching.map(post => (
-                        <div key={`calmem-post-${post.id}`} className="bg-white border rounded-2xl p-4 shadow-xs space-y-2">
-                          <div className="flex justify-between items-center text-[10px] select-none">
-                            <div className="flex items-center gap-1.5 font-bold text-[#ad292f]">
-                              <img src={post.avatar} className="w-5 h-5 rounded-full object-cover" alt="" />
-                              <span>{post.author} • 时光瞬间</span>
-                            </div>
-                            {post.mood && (
-                              <span className="bg-[#fceae9] text-[#ad292f] px-1.5 py-0.5 rounded-full font-bold">{post.mood}</span>
-                            )}
+                    <div className="space-y-4 max-h-[480px] overflow-y-auto pr-1">
+                      {Object.entries(grouped).map(([date, dayPosts]) => (
+                        <div key={date} className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] font-black text-[#ad292f] uppercase tracking-widest font-mono bg-rose-50 px-2 py-0.5 rounded-full border border-rose-100">
+                              {new Date(date + "T12:00:00").toLocaleDateString(language === "zh" ? "zh-CN" : "en-US", { month: "short", day: "numeric", year: "numeric" })}
+                            </span>
+                            <div className="h-px flex-1 bg-rose-100/50" />
                           </div>
-                          <p className="text-xs text-gray-700 font-serif leading-relaxed font-semibold pl-1">
-                            {post.content}
-                          </p>
-                          {post.imageUrl && (
-                            <div className="rounded-xl overflow-hidden max-h-40 bg-gray-50">
-                              <img src={post.imageUrl} className="w-full h-full object-cover" alt="" />
+                          {dayPosts.map(post => (
+                            <div key={post.id} className="bg-white border border-stone-100 rounded-2xl p-3.5 shadow-xs hover:shadow-sm transition-shadow space-y-2">
+                              <div className="flex items-center justify-between text-[10px]">
+                                <div className="flex items-center gap-1.5 font-bold text-[#ad292f]">
+                                  <img src={post.avatar} className="w-5 h-5 rounded-full object-cover ring-1 ring-white" alt="" />
+                                  <span>{post.author}</span>
+                                  {post.mood && <span className="text-[9px] bg-rose-50 text-[#ad292f] px-1.5 py-0.5 rounded-full">{post.mood}</span>}
+                                </div>
+                                <span className="text-stone-300 font-mono text-[9px]">{new Date(post.timestamp).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</span>
+                              </div>
+                              {post.content && (
+                                <p className="text-xs text-gray-700 leading-relaxed font-medium whitespace-pre-wrap line-clamp-3">{post.content}</p>
+                              )}
+                              {post.imageUrl && (
+                                <div className="rounded-xl overflow-hidden max-h-36 bg-gray-50 cursor-zoom-in" onClick={() => { setLightboxUrl(post.imageUrl!); setLightboxType("image"); }}>
+                                  <img src={post.imageUrl} className="w-full h-full object-cover" alt="" />
+                                </div>
+                              )}
+                              {post.videoUrl && (
+                                <div className="rounded-xl overflow-hidden max-h-36 bg-black">
+                                  <video src={post.videoUrl} controls playsInline className="w-full object-contain" />
+                                </div>
+                              )}
+                              <div className="pt-1 border-t border-stone-50 space-y-2">
+                                <div className="flex items-center gap-3">
+                                  <button onClick={(e) => handleToggleLike(post.id, e)} className="flex items-center gap-1 text-[10px] font-bold text-[#ad292f] cursor-pointer">
+                                    <Heart size={10} fill="#ad292f" /> {post.likes}
+                                  </button>
+                                  <span className="flex items-center gap-1 text-[10px] text-gray-400 font-bold">
+                                    <MessageCircle size={10} /> {post.comments.length}
+                                  </span>
+                                  <button
+                                    onClick={() => { if (window.confirm(language === "zh" ? "确定删除这条记录吗？" : "Delete this post?")) onUpdatePosts(posts.filter(p => p.id !== post.id)); }}
+                                    className="ml-auto text-gray-300 hover:text-red-400 transition-colors cursor-pointer p-0.5"
+                                  >
+                                    <Trash2 size={10} />
+                                  </button>
+                                </div>
+                                {post.comments.length > 0 && (
+                                  <div className="space-y-1 max-h-20 overflow-y-auto">
+                                    {post.comments.map(c => (
+                                      <div key={c.id} className="text-[9px] bg-stone-50 px-2 py-1.5 rounded-lg border border-stone-100">
+                                        <span className="font-bold text-[#ad292f]">{c.author}: </span>
+                                        <span className="text-gray-600">{c.content}</span>
+                                        {(c as any).mediaUrl && (
+                                          <div className="mt-1">
+                                            {(c as any).mediaType === "video"
+                                              ? <video src={(c as any).mediaUrl} controls className="w-full max-h-16 rounded" />
+                                              : <img src={(c as any).mediaUrl} className="w-full max-h-16 object-cover rounded" alt="" />}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="space-y-1">
+                                  {commentPendingMedia[post.id] && (
+                                    <div className="relative inline-block">
+                                      {commentPendingMedia[post.id].type === "video"
+                                        ? <div className="w-12 h-9 bg-black rounded-md flex items-center justify-center text-white text-sm">🎥</div>
+                                        : <img src={commentPendingMedia[post.id].url} className="w-12 h-9 object-cover rounded-md" alt="" />}
+                                      <button onClick={() => setCommentPendingMedia(prev => { const n = {...prev}; delete n[post.id]; return n; })} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-3.5 h-3.5 flex items-center justify-center cursor-pointer"><X size={7} /></button>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-1">
+                                    <label className="shrink-0 cursor-pointer p-1 rounded-full text-stone-400 hover:text-[#ad292f] hover:bg-rose-50 transition-colors">
+                                      <input type="file" accept="image/*,video/*" className="hidden" onChange={async (ev) => {
+                                        const file = ev.target.files?.[0]; if (!file) return;
+                                        const isVid = file.type.startsWith("video/"); const isImg = file.type.startsWith("image/");
+                                        if (!isVid && !isImg) return;
+                                        const fd = new FormData(); fd.append("file", file);
+                                        try {
+                                          const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+                                          const d = await res.json();
+                                          setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: d.url, type: isVid ? "video" : "image" } }));
+                                        } catch {
+                                          if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                                        }
+                                        ev.target.value = "";
+                                      }} />
+                                      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                                    </label>
+                                    <button type="button" onClick={() => {
+                                      if (commentListeningId === post.id) { commentRecognitionRef.current?.stop?.(); setCommentListeningId(null); }
+                                      else {
+                                        const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition; if (!SR) return;
+                                        const rec = new SR(); rec.lang = language === "zh" ? "zh-CN" : "en-US"; rec.continuous = false; rec.interimResults = false;
+                                        rec.onresult = (ev: any) => { const t = ev.results[0][0].transcript; setCommentPostInputs(prev => ({ ...prev, [post.id]: (prev[post.id] || "") + (prev[post.id] ? " " : "") + t })); };
+                                        rec.onend = () => setCommentListeningId(null); rec.onerror = () => setCommentListeningId(null);
+                                        commentRecognitionRef.current = rec; rec.start(); setCommentListeningId(post.id);
+                                      }
+                                    }} className={`shrink-0 p-1 rounded-full transition-colors cursor-pointer ${commentListeningId === post.id ? "bg-[#ad292f] text-white animate-pulse" : "text-stone-400 hover:text-[#ad292f] hover:bg-rose-50"}`}>
+                                      {commentListeningId === post.id ? <MicOff size={10} /> : <Mic size={10} />}
+                                    </button>
+                                    <div className="relative flex-1">
+                                      <input
+                                        type="text"
+                                        value={commentPostInputs[post.id] || ""}
+                                        onChange={(e) => setCommentPostInputs(prev => ({ ...prev, [post.id]: e.target.value }))}
+                                        placeholder={language === "zh" ? "写下想法…" : "Add a note..."}
+                                        className="w-full text-[9px] p-1.5 pr-6 border border-stone-100 rounded-full bg-stone-50/50 focus:bg-white focus:outline-none focus:ring-1 focus:ring-rose-200"
+                                        onKeyDown={(e) => { if (e.key === "Enter") handleAddPostComment(post.id); }}
+                                      />
+                                      <button onClick={() => handleAddPostComment(post.id)} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#ad292f] p-0.5 cursor-pointer">
+                                        <Send size={9} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
                             </div>
-                          )}
+                          ))}
                         </div>
                       ))}
                     </div>
                   );
                 })()}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* General Upcoming lists */}
-          <section className="space-y-4 select-none">
-            <h3 className="text-xs font-black text-gray-400 tracking-widest uppercase pl-1">
-              {calendarT.upcomingLabel}
-            </h3>
-
-            <div className="space-y-4 relative pl-5 before:content-[''] before:absolute before:left-[7px] before:top-2 before:bottom-2 before:w-[1.5px] before:bg-rose-100">
-              {calendarEvents.map((ev) => {
-                const countdownInfo = calculateDaysLeft(ev.date);
-
-                return (
-                  <div key={ev.id} className="relative select-text">
-                    <div className="absolute left-[-22px] top-6 w-[8.5px] h-[8.5px] rounded-full bg-[#ad292f] ring-4 ring-white z-10" />
-
-                    <div className="bg-white border-2 border-[#fff0f1] hover:border-rose-100 rounded-[24px] p-5 shadow-[0_8px_24px_rgba(244,63,94,0.015)] hover:shadow-[0_12px_36px_rgba(244,63,94,0.05)] flex gap-4 items-start border-l-4 border-l-[#ad292f] transition-all duration-300">
-                      <div className="p-3.5 rounded-2xl bg-[#fceae9] text-[#ad292f] shrink-0">
-                        {ev.eventType === "anniversary" ? (
-                          <Heart size={20} fill="#ad292f" />
-                        ) : ev.eventType === "birthday" ? (
-                          <Cake size={20} />
-                        ) : (
-                          <Gift size={20} />
-                        )}
-                      </div>
-
-                      <div className="flex-1 space-y-1">
-                        <div className="flex justify-between items-start gap-2">
-                          <span className="text-[10px] font-bold text-[#ad292f] uppercase tracking-widest font-mono">
-                            {new Date(ev.date).toLocaleDateString(language === "zh" ? "zh-CN" : "en-US", {
-                              month: "long",
-                              day: "numeric",
-                              year: "numeric"
-                            })}
-                          </span>
-                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-[#fceae9] text-[#ad292f] font-sans">
-                            {countdownInfo}
-                          </span>
-                        </div>
-
-                        <h4 className="text-md font-black text-gray-800 leading-tight">
-                          {ev.title}
-                        </h4>
-
-                        <p className="text-xs text-gray-500 leading-relaxed font-semibold italic pr-4">
-                          "{ev.description}"
+                </motion.div>
+              ) : (
+                <motion.div key="anniversaries" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                {(() => {
+                  if (events.length === 0) {
+                    return (
+                      <div className="text-center py-10 space-y-3">
+                        <p className="text-xs text-gray-400 font-medium italic">
+                          {language === "zh" ? "还没有纪念日 💝" : "No anniversaries yet 💝"}
                         </p>
-
-                        {ev.location && (
-                          <div className="flex items-center gap-1 text-[10px] text-gray-400 font-semibold pt-1">
-                            <MapPin size={10} className="text-[#ad292f]" />
-                            <span>{ev.location}</span>
-                          </div>
-                        )}
+                        <button
+                          onClick={() => setShowAddEventForm(true)}
+                          className="text-[10px] font-bold text-[#ad292f] bg-rose-50 px-4 py-2 rounded-full border border-rose-100 cursor-pointer hover:bg-rose-100"
+                        >
+                          + {language === "zh" ? "添加第一个纪念日" : "Add first anniversary"}
+                        </button>
                       </div>
-
-                      <button
-                        onClick={() => handleDeleteEvent(ev.id)}
-                        className="text-gray-300 hover:text-red-500 transition-colors self-start p-1.5 cursor-pointer"
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                    );
+                  }
+                  return (
+                    <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
+                      {events.map((ev) => {
+                        const countdownInfo = calculateDaysLeft(ev.date);
+                        const sEv = ev as any;
+                        return (
+                          <div key={ev.id} className="bg-white border border-rose-100/60 rounded-[20px] p-4 shadow-sm hover:shadow-md transition-shadow space-y-3">
+                            <div className="flex items-start gap-3">
+                              <div className="p-2.5 rounded-xl bg-[#fceae9] text-[#ad292f] shrink-0">
+                                {ev.eventType === "anniversary" ? <Heart size={15} fill="#ad292f" /> : ev.eventType === "birthday" ? <Cake size={15} /> : <Gift size={15} />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex justify-between items-center gap-2">
+                                  <span className="text-[9px] font-bold text-[#ad292f] uppercase tracking-widest font-mono">
+                                    {/^\d{2}-\d{2}$/.test(ev.date)
+                                      ? (language === "zh"
+                                          ? `${Number(ev.date.split("-")[0])}月${Number(ev.date.split("-")[1])}日 · 每年`
+                                          : `${new Date(`2000-${ev.date}`).toLocaleDateString("en-US", { month: "long", day: "numeric" })} · Yearly`)
+                                      : new Date(ev.date + "T12:00:00").toLocaleDateString(language === "zh" ? "zh-CN" : "en-US", { month: "long", day: "numeric", year: "numeric" })}
+                                  </span>
+                                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-[#ad292f] shrink-0">{countdownInfo}</span>
+                                </div>
+                                <h4 className="text-sm font-black text-gray-800 leading-snug mt-0.5">{ev.title}</h4>
+                                {ev.description && <p className="text-[11px] text-gray-500 font-medium italic mt-0.5 line-clamp-2">"{ev.description}"</p>}
+                                {ev.location && (
+                                  <div className="flex items-center gap-1 text-[10px] text-gray-400 mt-1">
+                                    <MapPin size={9} className="text-[#ad292f]" /><span>{ev.location}</span>
+                                  </div>
+                                )}
+                              </div>
+                              <button onClick={() => handleDeleteEvent(ev.id)} className="text-gray-300 hover:text-red-500 transition-colors p-1 shrink-0 cursor-pointer">
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                            <div className="border-t border-rose-50 pt-2.5 space-y-2">
+                              <div className="flex items-center gap-3">
+                                <button onClick={() => handleToggleEventLike(ev.id)} className={`flex items-center gap-1 text-xs font-bold transition-all cursor-pointer select-none ${sEv.likedByUser ? "text-[#ad292f]" : "text-gray-400 hover:text-[#ad292f]"}`}>
+                                  <motion.span
+                                    animate={likeAnimEventId === ev.id ? { scale: [1, 1.7, 0.9, 1.2, 1], rotate: [0, -15, 15, -8, 0] } : { scale: 1 }}
+                                    transition={{ duration: 0.5, ease: "easeOut" }}
+                                    style={{ display: "inline-flex" }}
+                                  >
+                                    <Heart size={12} fill={sEv.likedByUser ? "#ad292f" : "none"} />
+                                  </motion.span>
+                                  <span>{sEv.likes || 0}</span>
+                                </button>
+                                <div className="flex items-center gap-1 text-xs text-gray-400 font-bold">
+                                  <MessageCircle size={12} /><span>{(sEv.comments || []).length}</span>
+                                </div>
+                              </div>
+                              {(sEv.comments || []).length > 0 && (
+                                <div className="space-y-1.5 max-h-24 overflow-y-auto">
+                                  {(sEv.comments || []).map((c: any) => (
+                                    <div key={c.id} className="text-[10px] bg-rose-50/40 px-2.5 py-1.5 rounded-xl border border-rose-50">
+                                      <span className="font-bold text-[#ad292f]">{c.author}: </span>
+                                      <span className="text-gray-600">{c.content}</span>
+                                      {c.mediaUrl && (
+                                        <div className="mt-1">
+                                          {c.mediaType === "video"
+                                            ? <video src={c.mediaUrl} controls className="w-full max-h-20 rounded-lg" />
+                                            : <img src={c.mediaUrl} className="w-full max-h-20 object-cover rounded-lg" alt="" />}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="space-y-1.5">
+                                {commentPendingMedia[ev.id] && (
+                                  <div className="relative inline-block">
+                                    {commentPendingMedia[ev.id].type === "video"
+                                      ? <div className="w-14 h-10 bg-black rounded-lg flex items-center justify-center text-white text-base">🎥</div>
+                                      : <img src={commentPendingMedia[ev.id].url} className="w-14 h-10 object-cover rounded-lg" alt="" />}
+                                    <button onClick={() => setCommentPendingMedia(prev => { const n = {...prev}; delete n[ev.id]; return n; })} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center cursor-pointer"><X size={8} /></button>
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-1.5">
+                                  <label className="shrink-0 cursor-pointer p-1.5 rounded-full text-stone-400 hover:text-[#ad292f] hover:bg-rose-50 transition-colors">
+                                    <input type="file" accept="image/*,video/*" className="hidden" onChange={async (evinput) => {
+                                      const file = evinput.target.files?.[0]; if (!file) return;
+                                      const isVid = file.type.startsWith("video/"); const isImg = file.type.startsWith("image/");
+                                      if (!isVid && !isImg) return;
+                                      const fd = new FormData(); fd.append("file", file);
+                                      try {
+                                        const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+                                        const d = await res.json();
+                                        setCommentPendingMedia(prev => ({ ...prev, [ev.id]: { url: d.url, type: isVid ? "video" : "image" } }));
+                                      } catch {
+                                        if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [ev.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                                      }
+                                      evinput.target.value = "";
+                                    }} />
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                                  </label>
+                                  <button type="button" onClick={() => {
+                                    if (commentListeningId === ev.id) { commentRecognitionRef.current?.stop?.(); setCommentListeningId(null); }
+                                    else {
+                                      const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition; if (!SR) return;
+                                      const rec = new SR(); rec.lang = language === "zh" ? "zh-CN" : "en-US"; rec.continuous = false; rec.interimResults = false;
+                                      rec.onresult = (evr: any) => { const t = evr.results[0][0].transcript; setCommentEventInputs(prev => ({ ...prev, [ev.id]: (prev[ev.id] || "") + (prev[ev.id] ? " " : "") + t })); };
+                                      rec.onend = () => setCommentListeningId(null); rec.onerror = () => setCommentListeningId(null);
+                                      commentRecognitionRef.current = rec; rec.start(); setCommentListeningId(ev.id);
+                                    }
+                                  }} className={`shrink-0 p-1.5 rounded-full transition-colors cursor-pointer ${commentListeningId === ev.id ? "bg-[#ad292f] text-white animate-pulse" : "text-stone-400 hover:text-[#ad292f] hover:bg-rose-50"}`}>
+                                    {commentListeningId === ev.id ? <MicOff size={11} /> : <Mic size={11} />}
+                                  </button>
+                                  <div className="relative flex-1">
+                                    <input
+                                      type="text"
+                                      value={commentEventInputs[ev.id] || ""}
+                                      onChange={(e) => setCommentEventInputs(prev => ({ ...prev, [ev.id]: e.target.value }))}
+                                      placeholder={language === "zh" ? "写下留念…" : "Leave a note..."}
+                                      className="w-full text-[10px] p-2 pr-8 border border-rose-100/60 rounded-full bg-rose-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-rose-200"
+                                      onKeyDown={(e) => { if (e.key === "Enter") handleAddEventComment(ev.id); }}
+                                    />
+                                    <button onClick={() => handleAddEventComment(ev.id)} className="absolute right-2 top-1/2 -translate-y-1/2 text-[#ad292f] hover:text-[#ad292f]/80 p-0.5 cursor-pointer">
+                                      <Send size={11} />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })()}
+                </motion.div>
+              )}
+            </AnimatePresence>
           </section>
 
 
@@ -1944,13 +2283,122 @@ export default function TimelineTab({
           </div>
         </div>
       ) : viewStyle === "stream" ? (
-        /* STYLE A: MODERN STREAM TIMELINE FLOW WITH ROOMY MARGINS AND FLOATING HIGHLIGHTS (#1) */
-        <div className="space-y-6">
-          {posts.map((post) => (
-            <motion.article 
+        <div className="space-y-4">
+          {/* ── AI搜索栏 ── */}
+          <div className="bg-white border border-rose-100 rounded-2xl p-3.5 shadow-sm space-y-3">
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleStreamSearch(); }}
+              className="flex items-center gap-2"
+            >
+              <div className="relative flex-1">
+                <Sparkles size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#ad292f]/50 pointer-events-none" />
+                <input
+                  type="text"
+                  value={streamSearchQuery}
+                  onChange={(e) => {
+                    setStreamSearchQuery(e.target.value);
+                    if (!e.target.value) { setStreamSearchResult(null); setStreamMatchedPosts([]); }
+                  }}
+                  placeholder={language === "zh" ? "AI搜索时光记录..." : "AI search memories..."}
+                  className="w-full text-xs pl-8 pr-3 py-2.5 border border-rose-100 rounded-xl bg-rose-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-rose-200 font-semibold"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isStreamSearching || !streamSearchQuery.trim()}
+                className="bg-[#ad292f] disabled:bg-gray-200 text-white text-[10px] font-bold px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 cursor-pointer hover:bg-[#ad292f]/90 transition-all shrink-0"
+              >
+                {isStreamSearching ? (
+                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Send size={12} />
+                )}
+                {language === "zh" ? "搜" : "Go"}
+              </button>
+            </form>
+            <AnimatePresence>
+              {streamSearchResult && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="space-y-2">
+                    {/* AI summary */}
+                    <div className="bg-rose-50/50 border border-rose-100 rounded-xl p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[9px] font-black text-[#ad292f] uppercase tracking-widest flex items-center gap-1">
+                          <Sparkles size={9} /> AI
+                        </span>
+                        <button
+                          onClick={() => { setStreamSearchResult(null); setStreamSearchQuery(""); setStreamMatchedPosts([]); }}
+                          className="text-stone-400 hover:text-stone-600 cursor-pointer"
+                        >
+                          <X size={11} />
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-stone-700 font-medium leading-relaxed whitespace-pre-wrap">{streamSearchResult}</p>
+                    </div>
+                    {/* Matched post cards — click to jump to post in stream */}
+                    {streamMatchedPosts.length > 0 && (
+                      <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5">
+                        <p className="text-[9px] text-stone-400 font-bold px-1">{language === "zh" ? "👆 点击卡片跳转到对应记录" : "👆 Tap a card to jump to that memory"}</p>
+                        {streamMatchedPosts.map(mp => (
+                          <div
+                            key={mp.id}
+                            className="bg-white border border-rose-100 rounded-xl p-3 space-y-1.5 shadow-xs cursor-pointer hover:bg-rose-50/40 hover:border-[#ad292f]/30 transition-colors active:scale-[0.98]"
+                            onClick={() => {
+                              setViewStyle("stream"); // ensure stream view is showing
+                              setStreamSearchResult(null);
+                              setStreamSearchQuery("");
+                              setStreamMatchedPosts([]);
+                              setScrollToPostId(mp.id);
+                            }}
+                          >
+                            <div className="flex items-center justify-between text-[9px]">
+                              <div className="flex items-center gap-1.5 font-bold text-[#ad292f]">
+                                <img src={mp.avatar} className="w-4 h-4 rounded-full object-cover" alt="" />
+                                <span>{mp.author}</span>
+                                {mp.mood && <span className="bg-rose-50 px-1.5 py-0.5 rounded-full">{mp.mood}</span>}
+                              </div>
+                              <span className="text-stone-300 font-mono">{mp.timestamp.slice(0, 10)}</span>
+                            </div>
+                            {mp.content && <p className="text-[11px] text-gray-700 leading-relaxed font-medium whitespace-pre-wrap line-clamp-3">{mp.content}</p>}
+                            {mp.imageUrl && (
+                              <div className="rounded-lg overflow-hidden max-h-24">
+                                <img src={mp.imageUrl} className="w-full h-full object-cover" alt="" />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* STYLE A: MODERN STREAM TIMELINE FLOW WITH VERTICAL LINE + DOTS */}
+          <div className="relative pl-6 space-y-6 before:content-[''] before:absolute before:left-[11px] before:top-3 before:bottom-3 before:w-[2px] before:bg-gradient-to-b before:from-rose-200 before:via-rose-100 before:to-transparent">
+          {posts.map((post, postIdx) => (
+            <div key={post.id} className="relative">
+              {/* Timeline dot */}
+              <div className="absolute left-[-23px] top-7 w-[10px] h-[10px] rounded-full bg-[#ad292f] ring-[3px] ring-white shadow z-10" />
+              {/* Date stamp above first item or when date changes */}
+              {postIdx === 0 || new Date(post.timestamp).toDateString() !== new Date(posts[postIdx - 1].timestamp).toDateString() ? (
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="text-[9px] font-black text-[#ad292f] uppercase tracking-widest font-mono bg-rose-50 px-2 py-0.5 rounded-full border border-rose-100">
+                    {new Date(post.timestamp).toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                  </span>
+                </div>
+              ) : null}
+            <motion.article
+              id={`post-${post.id}`}
               layout
-              key={post.id} 
               className="bg-white border-2 border-[#fef0f1] rounded-[28px] p-6 lg:p-7 shadow-[0_8px_30px_rgba(244,63,94,0.02)] hover:shadow-[0_12px_40px_rgba(244,63,94,0.06)] hover:border-rose-100/70 transition-all duration-400 relative overflow-hidden"
+              style={{ transition: "box-shadow 0.4s ease, border-color 0.4s ease" }}
             >
               {/* Top corner gradient highlight */}
               <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-[#ad292f]/10 to-transparent" />
@@ -1996,38 +2444,57 @@ export default function TimelineTab({
               </p>
 
               {/* Fluid Polaroid picture/video */}
-              {(post.imageUrl || post.videoUrl) && (
-                <div className="mt-4 rounded-2xl overflow-hidden border border-rose-50 bg-[#fffdfa] p-3 shadow-xs max-w-lg">
-                  <div className="relative group overflow-hidden rounded-xl bg-gray-50 aspect-video flex items-center justify-center">
-                    {post.videoUrl ? (
-                      <video
-                        src={post.videoUrl}
-                        controls
-                        playsInline
-                        className="w-full h-full object-contain rounded-xl bg-black"
-                      />
-                    ) : (
-                      <img
-                        src={post.imageUrl}
-                        alt="Moment media"
-                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-101"
-                        referrerPolicy="no-referrer"
-                      />
-                    )}
-                  </div>
+              {(post.imageUrl || post.videoUrl || (post.mediaItems && post.mediaItems.length > 0)) && (
+                <div className="mt-4 rounded-2xl overflow-hidden border border-rose-50 bg-[#fffdfa] p-2.5 shadow-xs max-w-lg">
+                  {/* Multiple media items grid */}
+                  {post.mediaItems && post.mediaItems.length > 1 ? (
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {post.mediaItems.map((item, idx) => (
+                        <div key={idx} className="relative group overflow-hidden rounded-xl bg-gray-50 aspect-square">
+                          {item.type === "video" ? (
+                            <video src={item.url} controls playsInline className="w-full h-full object-cover rounded-xl bg-black" onClick={e => e.stopPropagation()} />
+                          ) : (
+                            <img src={item.url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => { setLightboxUrl(item.url); setLightboxType("image"); }} />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="relative group overflow-hidden rounded-xl bg-gray-50 flex items-center justify-center">
+                      {post.videoUrl ? (
+                        <video
+                          src={post.videoUrl}
+                          controls
+                          playsInline
+                          className="w-full h-auto object-contain rounded-xl bg-black"
+                          style={{ maxHeight: "480px", display: "block" }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <img
+                          src={post.imageUrl}
+                          alt="Moment media"
+                          className="w-full h-auto object-contain cursor-zoom-in transition-transform duration-300 group-hover:scale-[1.01]"
+                          style={{ maxHeight: "280px", display: "block" }}
+                          referrerPolicy="no-referrer"
+                          onClick={() => { setLightboxUrl(post.imageUrl!); setLightboxType("image"); }}
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* Heart and comment counters - MINIMALIST ICON METRICS */}
               <div className="flex items-center gap-4 mt-5 pt-3.5 border-t border-rose-50/50 select-none">
                 <button
-                  onClick={() => handleToggleLike(post.id)}
-                  className={`flex items-center gap-1.5 text-xs font-bold transition-all transform hover:scale-105 cursor-pointer ${
-                    post.likedByUser ? "text-[#ad292f]" : "text-gray-400 hover:text-[#ad292f]"
-                  }`}
+                  onClick={(e) => handleToggleLike(post.id, e)}
+                  className="flex items-center gap-1.5 text-xs font-bold transition-all transform hover:scale-105 cursor-pointer text-[#ad292f] active:scale-125"
                 >
-                  <Heart size={14} fill={post.likedByUser ? "#ad292f" : "none"} />
-                  <span>{post.likes}</span>
+                  <motion.div whileTap={{ scale: 1.5 }} transition={{ type: "spring", stiffness: 400, damping: 10 }}>
+                    <Heart size={14} fill={post.likedByUser ? "#ad292f" : "none"} className={post.likedByUser ? "text-[#ad292f]" : "text-gray-400"} />
+                  </motion.div>
+                  <span className="font-black text-[#ad292f]">{post.likes}</span>
                 </button>
 
                 <div className="flex items-center gap-1.5 text-xs text-gray-400 font-bold">
@@ -2054,38 +2521,104 @@ export default function TimelineTab({
                           </span>
                         </div>
                         <p className="text-[#735858] mt-0.5 font-medium leading-relaxed">{comment.content}</p>
+                        {comment.mediaUrl && (
+                          <div className="mt-1.5 rounded-lg overflow-hidden max-h-32">
+                            {comment.mediaType === "video" ? (
+                              <video src={comment.mediaUrl} controls playsInline className="w-full max-h-32 object-contain bg-black rounded-lg" />
+                            ) : (
+                              <img src={comment.mediaUrl} className="w-full max-h-32 object-cover rounded-lg cursor-zoom-in" onClick={() => { setLightboxUrl(comment.mediaUrl!); setLightboxType("image"); }} alt="" />
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
                 </div>
               )}
 
-              {/* Comment write-area */}
-              <div className="mt-4 pt-3.5 border-t border-rose-50/30">
-                <div className="relative flex items-center">
-                  <input
-                    type="text"
-                    value={commentInputs[post.id] || ""}
-                    onChange={(e) => setCommentInputs({ ...commentInputs, [post.id]: e.target.value })}
-                    placeholder={t.writeComment}
-                    className="w-full text-xs p-3 pr-11 border border-rose-100/60 rounded-full focus:ring-1 focus:ring-rose-200 bg-gray-50/50 focus:bg-white"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        handleAddComment(post.id);
+              {/* Comment write-area with media + voice */}
+              <div className="mt-4 pt-3.5 border-t border-rose-50/30 space-y-2">
+                {/* Pending comment media preview */}
+                {commentPendingMedia[post.id] && (
+                  <div className="relative inline-block">
+                    {commentPendingMedia[post.id].type === "video" ? (
+                      <div className="w-16 h-12 bg-black rounded-lg flex items-center justify-center text-white text-lg">🎥</div>
+                    ) : (
+                      <img src={commentPendingMedia[post.id].url} className="w-16 h-12 object-cover rounded-lg" alt="" />
+                    )}
+                    <button onClick={() => setCommentPendingMedia(prev => { const n = {...prev}; delete n[post.id]; return n; })} className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center cursor-pointer"><X size={8} /></button>
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5">
+                  {/* Camera button */}
+                  <label className="shrink-0 cursor-pointer p-1.5 rounded-full text-stone-400 hover:text-[#ad292f] hover:bg-rose-50 transition-colors">
+                    <input type="file" accept="image/*,video/*" className="hidden" onChange={async (ev) => {
+                      const file = ev.target.files?.[0];
+                      if (!file) return;
+                      const isVid = file.type.startsWith("video/");
+                      const isImg = file.type.startsWith("image/");
+                      if (!isVid && !isImg) return;
+                      const fd = new FormData(); fd.append("file", file);
+                      try {
+                        const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+                        const d = await res.json();
+                        setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: d.url, type: isVid ? "video" : "image" } }));
+                      } catch {
+                        if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                      }
+                      ev.target.value = "";
+                    }} />
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                  </label>
+                  {/* Mic button */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (commentListeningId === post.id) {
+                        commentRecognitionRef.current?.stop?.();
+                        setCommentListeningId(null);
+                      } else {
+                        const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+                        if (!SR) return;
+                        const rec = new SR();
+                        rec.lang = language === "zh" ? "zh-CN" : "en-US";
+                        rec.continuous = false;
+                        rec.interimResults = false;
+                        rec.onresult = (ev: any) => {
+                          const t = ev.results[0][0].transcript;
+                          setCommentInputs(prev => ({ ...prev, [post.id]: (prev[post.id] || "") + (prev[post.id] ? " " : "") + t }));
+                        };
+                        rec.onend = () => setCommentListeningId(null);
+                        rec.onerror = () => setCommentListeningId(null);
+                        commentRecognitionRef.current = rec;
+                        rec.start();
+                        setCommentListeningId(post.id);
                       }
                     }}
-                  />
-                  <button
-                    onClick={() => handleAddComment(post.id)}
-                    className="absolute right-3 text-[#ad292f] hover:text-[#ad292f]/80 p-1.5 rounded-full transition-colors"
+                    className={`shrink-0 p-1.5 rounded-full transition-colors cursor-pointer ${commentListeningId === post.id ? "bg-[#ad292f] text-white animate-pulse" : "text-stone-400 hover:text-[#ad292f] hover:bg-rose-50"}`}
                   >
-                    <Send size={13} />
+                    {commentListeningId === post.id ? <MicOff size={13} /> : <Mic size={13} />}
                   </button>
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={commentInputs[post.id] || ""}
+                      onChange={(e) => setCommentInputs({ ...commentInputs, [post.id]: e.target.value })}
+                      placeholder={t.writeComment}
+                      className="w-full text-xs p-3 pr-11 border border-rose-100/60 rounded-full focus:ring-1 focus:ring-rose-200 bg-gray-50/50 focus:bg-white"
+                      onKeyDown={(e) => { if (e.key === "Enter") handleAddComment(post.id); }}
+                    />
+                    <button onClick={() => handleAddComment(post.id)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#ad292f] hover:text-[#ad292f]/80 p-1.5 rounded-full transition-colors">
+                      <Send size={13} />
+                    </button>
+                  </div>
                 </div>
               </div>
 
             </motion.article>
+            </div>
           ))}
+        </div>
         </div>
       ) : (
         /* STYLE B: LINED DIARY BOOK RETRO WRITING STYLE - IMMERSIVE TWO-PAGE OPEN BINDER LAYOUT */
@@ -2119,8 +2652,70 @@ export default function TimelineTab({
               const remaining = activePost.content ? activePost.content.substring(1) : "";
 
               return (
-                <div className="relative select-none">
-                  
+                <div className="space-y-3">
+
+                  {/* TOC toolbar */}
+                  <div className="flex items-center justify-between gap-2 select-none">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-stone-400 font-mono">{activePostIdx + 1} / {posts.length}</span>
+                      <button
+                        onClick={() => setShowToc(v => !v)}
+                        className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all cursor-pointer ${showToc ? "bg-[#ad292f] text-white border-[#ad292f]" : "bg-stone-50 text-stone-600 border-stone-200 hover:border-[#ad292f]/40"}`}
+                      >
+                        <LayoutList size={11} />
+                        {language === "zh" ? "目录" : "Contents"}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={handlePrevPage} disabled={activePostIdx === 0} className="p-1.5 rounded-full bg-stone-50 border border-stone-200 text-stone-500 hover:text-[#ad292f] disabled:opacity-30 cursor-pointer transition-all">
+                        <ChevronLeft size={13} />
+                      </button>
+                      <button onClick={handleNextPage} disabled={activePostIdx >= posts.length - 1} className="p-1.5 rounded-full bg-stone-50 border border-stone-200 text-stone-500 hover:text-[#ad292f] disabled:opacity-30 cursor-pointer transition-all">
+                        <ChevronRight size={13} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* TOC Dropdown panel */}
+                  <AnimatePresence>
+                    {showToc && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="bg-[#fffdfa] border border-stone-200/60 rounded-2xl shadow-inner p-3 max-h-64 overflow-y-auto space-y-0.5 select-none">
+                          <p className="text-[9px] font-black text-stone-400 uppercase tracking-widest px-2 pb-2 border-b border-stone-100">
+                            {language === "zh" ? "全部日记" : "All Entries"} · {posts.length}
+                          </p>
+                          {posts.map((p, idx) => (
+                            <button
+                              key={`toc-${p.id}`}
+                              onClick={() => {
+                                setFlipDirection(idx > activePostIdx ? "next" : "prev");
+                                setDiaryBookIndex(idx);
+                                setShowToc(false);
+                                playPageTurnSound();
+                              }}
+                              className={`w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-xl transition-all cursor-pointer ${idx === activePostIdx ? "bg-[#fceae9] text-[#ad292f]" : "hover:bg-stone-50 text-stone-700"}`}
+                            >
+                              <span className={`text-[9px] font-black font-mono w-5 shrink-0 text-right ${idx === activePostIdx ? "text-[#ad292f]" : "text-stone-300"}`}>{idx + 1}</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[10px] font-bold truncate">{p.content?.slice(0, 28) || (p.imageUrl ? "📷" : p.videoUrl ? "🎬" : "…")}</p>
+                                <p className="text-[9px] text-stone-400 font-mono">{p.author} · {p.timestamp?.slice(0, 10)}</p>
+                              </div>
+                              {p.imageUrl && <span className="text-[9px] shrink-0 text-stone-300">📷</span>}
+                              {p.videoUrl && <span className="text-[9px] shrink-0 text-stone-300">🎬</span>}
+                              {idx === activePostIdx && <ChevronLeft size={9} className="text-[#ad292f] shrink-0" />}
+                            </button>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <div className="relative select-none">
                   {/* Visual Paper Stack Depth Overlays underneath */}
                   <div className="absolute inset-x-3 -bottom-3 bg-stone-200/40 h-full rounded-3xl pointer-events-none transform translate-y-2 border border-stone-300/10 shadow-xs" />
                   <div className="absolute inset-x-1.5 -bottom-1.5 bg-stone-100/60 h-full rounded-3xl pointer-events-none transform translate-y-1 border border-stone-200/10 shadow-xs" />
@@ -2128,7 +2723,7 @@ export default function TimelineTab({
                   {/* Main Book Binder Container */}
                   <div className="relative bg-white rounded-3xl border border-stone-200/60 shadow-[0_15px_45px_-12px_rgba(115,88,88,0.08)] overflow-visible min-h-[460px] md:min-h-[500px]">
                     
-                    {/* Interactive colored index tabs on the right edge of book (like multi-page binder) */}
+                    {/* Side index tabs - desktop only */}
                     <div className="absolute right-[-24px] sm:right-[-32px] top-8 flex flex-col gap-2 z-20 pointer-events-auto hidden md:flex">
                       {posts.slice(0, 10).map((p, idx) => (
                         <button
@@ -2150,27 +2745,6 @@ export default function TimelineTab({
                       ))}
                     </div>
 
-                    {/* Left & Right Page Turning Buttons (Vintage Bookmarks floating in center side borders) */}
-                    {activePostIdx > 0 && (
-                      <button
-                        onClick={handlePrevPage}
-                        className="absolute left-[-20px] md:left-[-24px] top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white text-stone-600 hover:text-rose-800 shadow-[0_4px_12px_rgba(0,0,0,0.1)] border border-stone-200/60 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 transition-all z-40"
-                        aria-label="Previous Page"
-                      >
-                        <ChevronLeft size={20} className="stroke-[2.5]" />
-                      </button>
-                    )}
-
-                    {activePostIdx < posts.length - 1 && (
-                      <button
-                        onClick={handleNextPage}
-                        className="absolute right-[-20px] md:right-[-24px] top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white text-stone-600 hover:text-rose-800 shadow-[0_4px_12px_rgba(0,0,0,0.1)] border border-stone-200/60 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 transition-all z-40"
-                        aria-label="Next Page"
-                      >
-                        <ChevronRight size={20} className="stroke-[2.5]" />
-                      </button>
-                    )}
-
                     {/* Left & Right Interactive page with page flip motion transition */}
                     <AnimatePresence mode="wait" custom={flipDirection === "next" ? 1 : -1}>
                       <motion.div
@@ -2182,10 +2756,25 @@ export default function TimelineTab({
                         className="grid grid-cols-1 md:grid-cols-2 relative min-w-0"
                       >
                         
-                        {/* LEFT PAGE - LINED HANDWRITING CANVAS */}
+                        {/* LEFT PAGE - LINED HANDWRITING CANVAS — click = prev page */}
                         <div 
                           className="p-6 sm:p-8 md:p-10 relative bg-stone-50/20 border-r border-stone-200/35 rounded-t-3xl md:rounded-tr-none md:rounded-l-3xl transition-all duration-300 select-none"
+                          onClick={(e) => {
+                            const tgt = e.target as HTMLElement;
+                            if (!tgt.closest("button") && !tgt.closest("input") && !tgt.closest("video") && !tgt.closest("textarea") && !tgt.closest("img")) {
+                              // On mobile single-col: left half = prev, right half = next
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              const isLeftHalf = e.clientX < rect.left + rect.width / 2;
+                              if (window.innerWidth < 768) {
+                                if (isLeftHalf && activePostIdx > 0) handlePrevPage();
+                                else if (!isLeftHalf && activePostIdx < posts.length - 1) handleNextPage();
+                              } else {
+                                if (activePostIdx > 0) handlePrevPage();
+                              }
+                            }
+                          }}
                           style={{
+                            cursor: activePostIdx > 0 ? "w-resize" : "default",
                             backgroundImage: "linear-gradient(rgba(115,88,88,0.035) 1.8rem, transparent 1.8rem)",
                             backgroundSize: "100% 1.8rem",
                             lineHeight: "1.8rem"
@@ -2252,9 +2841,23 @@ export default function TimelineTab({
                           ))}
                         </div>
 
-                        {/* RIGHT PAGE - POLAROID DISPLAY, COMMENTS FEED, TEXT AREA */}
+                        {/* RIGHT PAGE - POLAROID DISPLAY, COMMENTS FEED, TEXT AREA — click = next page */}
                         <div 
                           className="p-6 sm:p-8 md:p-10 bg-white relative flex flex-col justify-between min-w-0 rounded-b-3xl md:rounded-bl-none md:rounded-r-3xl transition-all duration-300 select-none"
+                          onClick={(e) => {
+                            const tgt = e.target as HTMLElement;
+                            if (!tgt.closest("button") && !tgt.closest("input") && !tgt.closest("video") && !tgt.closest("textarea") && !tgt.closest("img")) {
+                              // On mobile: already handled by left page. On desktop: right page = next
+                              if (window.innerWidth >= 768 && activePostIdx < posts.length - 1) handleNextPage();
+                              else if (window.innerWidth < 768) {
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                const isLeftHalf = e.clientX < rect.left + rect.width / 2;
+                                if (isLeftHalf && activePostIdx > 0) handlePrevPage();
+                                else if (!isLeftHalf && activePostIdx < posts.length - 1) handleNextPage();
+                              }
+                            }
+                          }}
+                          style={{ cursor: activePostIdx < posts.length - 1 ? "e-resize" : "default" }}
                         >
                           <div className="space-y-4">
                             
@@ -2269,13 +2872,15 @@ export default function TimelineTab({
                                         controls
                                         playsInline
                                         className="w-full h-full object-contain bg-black"
+                                        onClick={(e) => e.stopPropagation()}
                                       />
                                     ) : (
                                       <img
                                         src={activePost.imageUrl}
-                                        className="w-full h-full object-cover"
+                                        className="w-full h-full object-cover cursor-zoom-in"
                                         alt="Couple Memory Snapshot"
                                         referrerPolicy="no-referrer"
+                                        onClick={(e) => { e.stopPropagation(); setLightboxUrl(activePost.imageUrl!); setLightboxType("image"); }}
                                       />
                                     )}
                                   </div>
@@ -2317,50 +2922,76 @@ export default function TimelineTab({
                             )}
                           </div>
 
-                          {/* Action footer containing metrics (Heart/Comment counters) & simple micro inputs */}
-                          <div className="border-t border-stone-100/80 pt-3 shrink-0 select-none">
-                            <div className="flex items-center justify-between gap-3">
-                              
-                              {/* Pure Icon and Counters */}
-                              <div className="flex items-center gap-3">
-                                <button
-                                  onClick={() => handleToggleLike(activePost.id)}
-                                  className={`flex items-center gap-1 text-xs font-bold transition-all transform hover:scale-110 cursor-pointer ${
-                                    activePost.likedByUser ? "text-[#ad292f]" : "text-stone-400 hover:text-rose-600"
-                                  }`}
-                                >
-                                  <Heart size={13} fill={activePost.likedByUser ? "#ad292f" : "none"} />
-                                  <span>{activePost.likes}</span>
-                                </button>
-                                
-                                <div className="flex items-center gap-1 text-xs text-stone-400 font-bold">
-                                  <MessageCircle size={13} />
-                                  <span>{activePost.comments.length}</span>
-                                </div>
+                          {/* Action footer containing metrics & comment input with mic + camera */}
+                          <div className="border-t border-stone-100/80 pt-3 shrink-0 select-none space-y-2">
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={(e) => handleToggleLike(activePost.id, e)}
+                                className="flex items-center gap-1 text-xs font-bold transition-all transform hover:scale-110 cursor-pointer text-[#ad292f] active:scale-125"
+                              >
+                                <motion.div whileTap={{ scale: 1.6 }} transition={{ type: "spring", stiffness: 400 }}>
+                                  <Heart size={13} fill={activePost.likedByUser ? "#ad292f" : "none"} className={activePost.likedByUser ? "text-[#ad292f]" : "text-stone-400"} />
+                                </motion.div>
+                                <span className="font-black">{activePost.likes}</span>
+                              </button>
+                              <div className="flex items-center gap-1 text-xs text-stone-400 font-bold">
+                                <MessageCircle size={13} />
+                                <span>{activePost.comments.length}</span>
                               </div>
-
-                              {/* Elegant inline comments writing input */}
-                              <div className="relative flex items-center flex-1 max-w-[170px]">
+                            </div>
+                            {/* Pending comment media preview */}
+                            {commentPendingMedia[activePost.id] && (
+                              <div className="relative inline-block">
+                                {commentPendingMedia[activePost.id].type === "video"
+                                  ? <div className="w-12 h-9 bg-black rounded-md flex items-center justify-center text-white text-sm">🎥</div>
+                                  : <img src={commentPendingMedia[activePost.id].url} className="w-12 h-9 object-cover rounded-md" alt="" />}
+                                <button onClick={() => setCommentPendingMedia(prev => { const n = {...prev}; delete n[activePost.id]; return n; })} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-3.5 h-3.5 flex items-center justify-center cursor-pointer"><X size={7} /></button>
+                              </div>
+                            )}
+                            {/* Comment input with camera + mic */}
+                            <div className="flex items-center gap-1">
+                              <label className="shrink-0 cursor-pointer p-1 rounded-full text-stone-400 hover:text-[#ad292f] hover:bg-rose-50 transition-colors">
+                                <input type="file" accept="image/*,video/*" className="hidden" onChange={async (ev) => {
+                                  const file = ev.target.files?.[0]; if (!file) return;
+                                  const isVid = file.type.startsWith("video/"); const isImg = file.type.startsWith("image/");
+                                  if (!isVid && !isImg) return;
+                                  const fd = new FormData(); fd.append("file", file);
+                                  try {
+                                    const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+                                    const d = await res.json();
+                                    setCommentPendingMedia(prev => ({ ...prev, [activePost.id]: { url: d.url, type: isVid ? "video" : "image" } }));
+                                  } catch {
+                                    if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [activePost.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                                  }
+                                  ev.target.value = "";
+                                }} />
+                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                              </label>
+                              <button type="button" onClick={() => {
+                                if (commentListeningId === activePost.id) { commentRecognitionRef.current?.stop?.(); setCommentListeningId(null); }
+                                else {
+                                  const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition; if (!SR) return;
+                                  const rec = new SR(); rec.lang = language === "zh" ? "zh-CN" : "en-US"; rec.continuous = false; rec.interimResults = false;
+                                  rec.onresult = (ev: any) => { const t = ev.results[0][0].transcript; setCommentInputs(prev => ({ ...prev, [activePost.id]: (prev[activePost.id] || "") + (prev[activePost.id] ? " " : "") + t })); };
+                                  rec.onend = () => setCommentListeningId(null); rec.onerror = () => setCommentListeningId(null);
+                                  commentRecognitionRef.current = rec; rec.start(); setCommentListeningId(activePost.id);
+                                }
+                              }} className={`shrink-0 p-1 rounded-full transition-colors cursor-pointer ${commentListeningId === activePost.id ? "bg-[#ad292f] text-white animate-pulse" : "text-stone-400 hover:text-[#ad292f] hover:bg-rose-50"}`}>
+                                {commentListeningId === activePost.id ? <MicOff size={10} /> : <Mic size={10} />}
+                              </button>
+                              <div className="relative flex-1">
                                 <input
                                   type="text"
                                   value={commentInputs[activePost.id] || ""}
                                   onChange={(e) => setCommentInputs({ ...commentInputs, [activePost.id]: e.target.value })}
                                   placeholder={t.writeComment}
                                   className="w-full text-[10px] p-2 pr-7 border border-stone-200 rounded-lg focus:ring-1 focus:ring-rose-200 bg-stone-50/50 focus:bg-white transition-all outline-none text-stone-700 font-medium"
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      handleAddComment(activePost.id);
-                                    }
-                                  }}
+                                  onKeyDown={(e) => { if (e.key === "Enter") handleAddComment(activePost.id); }}
                                 />
-                                <button
-                                  onClick={() => handleAddComment(activePost.id)}
-                                  className="absolute right-1 text-rose-800 hover:text-rose-950 p-1 rounded-full cursor-pointer transition-colors"
-                                >
-                                  <Send size={11} />
+                                <button onClick={() => handleAddComment(activePost.id)} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-rose-800 hover:text-rose-950 p-1 rounded-full cursor-pointer transition-colors">
+                                  <Send size={10} />
                                 </button>
                               </div>
-
                             </div>
                           </div>
 
@@ -2371,19 +3002,108 @@ export default function TimelineTab({
 
                   </div>
 
-                  {/* Elegant bottom compact footer presenting simple page tags & navigation help hint */}
-                  <div className="mt-4 flex select-none justify-center items-center text-[10px] text-stone-400 font-medium px-2">
-                    <span className="font-mono">
+                  {/* Bottom footer: page indicator + mobile tap hints */}
+                  <div className="mt-4 flex select-none justify-between items-center text-[10px] text-stone-400 font-medium px-3">
+                    <button
+                      onClick={() => activePostIdx > 0 && handlePrevPage()}
+                      className={`flex items-center gap-1 px-3 py-1.5 rounded-full transition-all cursor-pointer md:hidden ${activePostIdx > 0 ? "bg-rose-50 text-[#ad292f] font-bold" : "text-stone-300 pointer-events-none"}`}
+                    >
+                      <ChevronLeft size={12} /> {language === 'zh' ? '上一页' : 'Prev'}
+                    </button>
+                    <span className="font-mono mx-auto">
                       {language === 'zh' ? '第' : 'Page'} <strong className="text-rose-800 font-extrabold">{activePostIdx + 1}</strong> / {posts.length} {language === 'zh' ? '篇' : 'memos'}
                     </span>
+                    <button
+                      onClick={() => activePostIdx < posts.length - 1 && handleNextPage()}
+                      className={`flex items-center gap-1 px-3 py-1.5 rounded-full transition-all cursor-pointer md:hidden ${activePostIdx < posts.length - 1 ? "bg-rose-50 text-[#ad292f] font-bold" : "text-stone-300 pointer-events-none"}`}
+                    >
+                      {language === 'zh' ? '下一页' : 'Next'} <ChevronRight size={12} />
+                    </button>
                   </div>
 
+                </div>
                 </div>
               );
             })()
           )}
         </div>
       )}
+      {/* Scroll-to-top floating button — stream view only */}
+      <AnimatePresence>
+        {viewStyle === "stream" && showScrollTop && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            transition={{ duration: 0.2 }}
+            onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+            className="fixed bottom-24 left-4 z-[65] w-10 h-10 rounded-full bg-white/95 backdrop-blur-sm border border-rose-100 text-[#ad292f] shadow-md flex items-center justify-center cursor-pointer hover:bg-rose-50 active:scale-95 transition-colors"
+            aria-label={language === "zh" ? "返回顶部" : "Back to top"}
+          >
+            <ChevronUp size={18} />
+          </motion.button>
+        )}
+      </AnimatePresence>
+
+      {/* Floating like heart particles */}
+      <AnimatePresence>
+        {likeParticles.map(p => (
+          <motion.div
+            key={p.id}
+            className="fixed pointer-events-none z-[200] text-[#ad292f] select-none"
+            style={{ left: p.x, top: p.y }}
+            initial={{ opacity: 1, y: 0, x: "-50%", scale: 0.5 }}
+            animate={{ opacity: 0, y: -80, scale: 1.8 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 1.1, ease: "easeOut" }}
+          >
+            <Heart size={28} fill="#ad292f" />
+          </motion.div>
+        ))}
+      </AnimatePresence>
+
+      {/* Image / Video Lightbox */}
+      <AnimatePresence>
+        {lightboxUrl && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/90 z-[300] flex items-center justify-center p-4"
+            onClick={() => setLightboxUrl(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.85 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.85 }}
+              transition={{ type: "spring", stiffness: 300, damping: 26 }}
+              className="relative max-w-4xl w-full max-h-[90vh] flex items-center justify-center"
+              onClick={e => e.stopPropagation()}
+            >
+              {lightboxType === "image" ? (
+                <img
+                  src={lightboxUrl}
+                  className="max-w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl"
+                  alt="Full view"
+                />
+              ) : (
+                <video
+                  src={lightboxUrl}
+                  controls
+                  autoPlay
+                  className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl bg-black"
+                />
+              )}
+              <button
+                onClick={() => setLightboxUrl(null)}
+                className="absolute -top-4 -right-4 w-9 h-9 bg-white/20 hover:bg-white/40 text-white rounded-full flex items-center justify-center cursor-pointer transition-all backdrop-blur-sm"
+              >
+                <X size={16} />
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

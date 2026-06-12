@@ -58,7 +58,7 @@ class AudioEngine {
 
       osc.type = "sine";
       osc.frequency.setValueAtTime(420, this.ctx.currentTime);
-      osc.frequency.quadraticRampToValueAtTime(880, this.ctx.currentTime + 0.18);
+      osc.frequency.linearRampToValueAtTime(880, this.ctx.currentTime + 0.18);
 
       gain.gain.setValueAtTime(0.05, this.ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.18);

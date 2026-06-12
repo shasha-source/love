@@ -11,13 +11,14 @@ import DiaryTab from "./components/DiaryTab";
 import ProfileTab from "./components/ProfileTab";
 import { audio } from "./utils/audio";
 import { 
-  Heart, 
-  Calendar as CalendarIcon, 
-  BookOpen, 
-  Settings, 
-  Sparkles, 
-  Lock, 
-  Eye, 
+  Heart,
+  Calendar as CalendarIcon,
+  BookOpen,
+  Settings,
+  Sparkles,
+  Lock,
+  Eye,
+  EyeOff,
   ArrowRight,
   ShieldCheck,
   Coffee,
@@ -29,7 +30,7 @@ export default function App() {
   // 10. Startup Loading Screen state
   const [appIsLoading, setAppIsLoading] = useState(true);
 
-  // Synchronized Scrapbook Storage
+  // Synchronized Scrapbook Storage (localStorage for fast first paint)
   const [profile, setProfile] = useState<ProfileSettings>(() => {
     const saved = localStorage.getItem("couple_profile");
     return saved ? JSON.parse(saved) : initialProfile;
@@ -50,6 +51,13 @@ export default function App() {
     return saved ? JSON.parse(saved) : initialCalendarEvents;
   });
 
+  // DB ready flag — true after initial API load completes
+  const [dbReady, setDbReady] = useState(false);
+  // Debounce timers for DB sync
+  const saveTimers = React.useRef<{ posts: any; events: any; diary: any; profile: any }>({
+    posts: null, events: null, diary: null, profile: null,
+  });
+
   const [activeTab, setActiveTab] = useState<"timeline" | "diary" | "profile">("timeline");
 
   // Global Add FAB triggers representing clicks on the + button
@@ -62,8 +70,8 @@ export default function App() {
     } else if (activeTab === "diary") {
       setDiaryAddTrigger((t) => t + 1);
     } else {
+      // Just switch to timeline — don't open the add form; FAB only visible on timeline anyway
       setActiveTab("timeline");
-      setTimelineAddTrigger((t) => t + 1);
     }
   };
 
@@ -116,6 +124,8 @@ export default function App() {
 
   const [lockPin, setLockPin] = useState("");
   const [lockError, setLockError] = useState("");
+  const [showPin, setShowPin] = useState(false);
+  const [showLoginHeart, setShowLoginHeart] = useState(false);
 
   // Dismiss Loading screen after 1.8s for smooth romance loading experience (#10)
   useEffect(() => {
@@ -125,26 +135,111 @@ export default function App() {
     return () => clearTimeout(loaderTimer);
   }, []);
 
-  // Keep LocalStorage in sync
+  // ── On mount: load fresh data from DB (overrides localStorage if DB has content) ──
+  useEffect(() => {
+    async function loadFromDB() {
+      try {
+        const [postsRes, eventsRes, diaryRes, profileRes] = await Promise.all([
+          fetch("/api/posts"),
+          fetch("/api/events"),
+          fetch("/api/diary"),
+          fetch("/api/profile"),
+        ]);
+        const [dbPosts, dbEvents, dbDiary, dbProfile] = await Promise.all([
+          postsRes.json(),
+          eventsRes.json(),
+          diaryRes.json(),
+          profileRes.json(),
+        ]);
+
+        // Only replace local data if DB has content
+        if (Array.isArray(dbPosts) && dbPosts.length > 0) {
+          setPosts(dbPosts);
+          localStorage.setItem("couple_posts", JSON.stringify(dbPosts));
+        }
+        if (Array.isArray(dbEvents) && dbEvents.length > 0) {
+          setEvents(dbEvents);
+          localStorage.setItem("couple_events", JSON.stringify(dbEvents));
+        }
+        if (Array.isArray(dbDiary) && dbDiary.length > 0) {
+          setEntries(dbDiary);
+          localStorage.setItem("couple_diary_entries", JSON.stringify(dbDiary));
+        }
+        if (dbProfile && typeof dbProfile === "object" && (dbProfile as any).partner1Name) {
+          setProfile(dbProfile as ProfileSettings);
+          localStorage.setItem("couple_profile", JSON.stringify(dbProfile));
+        }
+        console.log("✅ Data loaded from Neon DB");
+      } catch {
+        console.log("ℹ️ DB not available — using localStorage");
+      } finally {
+        setDbReady(true);
+      }
+    }
+    loadFromDB();
+  }, []);
+
+  // ── Keep localStorage in sync AND debounce-save to DB when dbReady ──
   useEffect(() => {
     localStorage.setItem("couple_profile", JSON.stringify(profile));
-  }, [profile]);
+    if (!dbReady) return;
+    clearTimeout(saveTimers.current.profile);
+    saveTimers.current.profile = setTimeout(() => {
+      fetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      }).catch(() => {});
+    }, 800);
+  }, [profile, dbReady]);
 
   useEffect(() => {
     localStorage.setItem("couple_posts", JSON.stringify(posts));
-  }, [posts]);
+    if (!dbReady) return;
+    clearTimeout(saveTimers.current.posts);
+    saveTimers.current.posts = setTimeout(() => {
+      fetch("/api/posts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ posts }),
+      }).catch(() => {});
+    }, 800);
+  }, [posts, dbReady]);
 
   useEffect(() => {
     localStorage.setItem("couple_diary_entries", JSON.stringify(entries));
-  }, [entries]);
+    if (!dbReady) return;
+    clearTimeout(saveTimers.current.diary);
+    saveTimers.current.diary = setTimeout(() => {
+      fetch("/api/diary", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries }),
+      }).catch(() => {});
+    }, 800);
+  }, [entries, dbReady]);
 
   useEffect(() => {
     localStorage.setItem("couple_events", JSON.stringify(events));
-  }, [events]);
+    if (!dbReady) return;
+    clearTimeout(saveTimers.current.events);
+    saveTimers.current.events = setTimeout(() => {
+      fetch("/api/events", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events }),
+      }).catch(() => {});
+    }, 800);
+  }, [events, dbReady]);
 
   useEffect(() => {
     localStorage.setItem("couple_locked", JSON.stringify(isLocked));
   }, [isLocked]);
+
+  // Scroll to top whenever the active tab changes
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+  }, [activeTab]);
 
   const lang = profile.language;
 
@@ -214,14 +309,14 @@ export default function App() {
       daysTogether: "天相守",
       daysSince: "爱意起点",
       timelineTab: "时光",
-      diaryTab: "AI查找",
+      diaryTab: "AI分析",
       profileTab: "设置",
       loveGreeting: "相伴岁月长路 ✨",
       lockTitle: "秘密相册",
       lockDesc: "锁住了属于我们的甜蜜时刻，输入恋爱暗号开启 🗝️",
       lockHint: "初始默认暗号为 'love'",
       unlockBtn: "开启甜蜜档案 💖",
-      appTitle: "暮色手账",
+      appTitle: "爱情手帐",
       loaderGreeting: "开启恋爱编年史...",
       romanticNote: "两颗有趣的灵魂终会相遇。"
     },
@@ -229,7 +324,7 @@ export default function App() {
       daysTogether: "Days Together",
       daysSince: "Pledge Date",
       timelineTab: "Moments",
-      diaryTab: "AI Search",
+      diaryTab: "AI Analysis",
       profileTab: "Settings",
       loveGreeting: "Writing our eternal chronicle together ✨",
       lockTitle: "Our Private Lockbox",
@@ -248,9 +343,14 @@ export default function App() {
     const correctPass = (profile.passcode || "love").trim();
     if (lockPin.trim().toLowerCase() === correctPass.toLowerCase()) {
       audio.playSuccess();
-      setIsLocked(false);
-      setLockPin("");
-      setLockError("");
+      setShowLoginHeart(true);
+      setTimeout(() => {
+        setIsLocked(false);
+        setLockPin("");
+        setLockError("");
+        setShowPin(false);
+        setShowLoginHeart(false);
+      }, 1600);
     } else {
       audio.playTap();
       setTimeout(() => audio.playTap(), 100);
@@ -295,129 +395,152 @@ export default function App() {
     );
   }
 
-  /* 9. REDESIGNED PASSCODE LOCK GATESCREEN FOR PRIVATE SCRAPBOOK SAFETY */
-  if (isLocked) {
+  /* 9. FULL-PAGE LOCK / LOGIN SCREEN */
+  if (isLocked || showLoginHeart) {
     return (
-      <div 
-        className="fixed inset-0 bg-gradient-to-br from-[#fff6f4] via-[#faf0eb] to-[#fbf7f6] z-[500] flex items-center justify-center p-4 overflow-y-auto select-none"
+      <div
+        className="min-h-screen w-full flex flex-col select-none relative"
         style={{
-          backgroundImage: "radial-gradient(#ad292f/0.05 1px, transparent 1px)",
-          backgroundSize: "20px 20px"
+          background: "linear-gradient(160deg,#fff6f4 0%,#fdf0ee 45%,#f9ebe8 100%)",
+          backgroundImage: "radial-gradient(circle at 20% 20%, rgba(173,41,47,0.06) 0%, transparent 50%), radial-gradient(circle at 80% 80%, rgba(173,41,47,0.04) 0%, transparent 50%)"
         }}
       >
-        <motion.div
-          initial={{ scale: 0.95, opacity: 0, y: 25 }}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
-          transition={{ type: "spring", stiffness: 260, damping: 20 }}
-          className="bg-white border-4 border-stone-200/20 rounded-[32px] p-6 sm:p-10 max-w-md w-full shadow-2xl relative text-center space-y-8 overflow-hidden"
-        >
-          {/* Top Stamp indicator */}
-          <div className="absolute top-4 right-4 text-[8px] uppercase font-black text-[#ad292f]/40 font-mono tracking-widest bg-rose-50 px-2.5 py-1 rounded-full">
-            💌 Secure Archive Gate
-          </div>
+        {/* Top strip */}
+        <div className="w-full px-6 pt-8 pb-4 flex items-center justify-between">
+          <span className="text-[10px] font-black text-[#ad292f]/50 tracking-widest uppercase font-mono">爱情手帐</span>
+          <span className="text-[9px] font-bold bg-rose-100/60 text-[#ad292f]/70 px-2.5 py-1 rounded-full">💌 私密相册</span>
+        </div>
 
-          {/* Romantic Banner Graphic */}
-          <div className="space-y-4 relative">
-            <button 
-              type="button"
-              onClick={(e) => spawnHearts(e)}
-              className="w-16 h-16 rounded-full bg-gradient-to-tr from-[#ad292f] to-rose-400 text-white flex items-center justify-center mx-auto shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer relative group"
-            >
-              <Heart size={24} fill="#ffffff" className="group-hover:animate-ping" />
-              <span className="absolute -top-1 -right-1 bg-amber-400 text-stone-900 text-[8px] font-black px-1.5 py-0.5 rounded-full animate-bounce">
-                +1💖
-              </span>
-            </button>
-
-            <div className="space-y-1">
-              <h1 className="font-serif text-3xl font-black text-stone-850 tracking-tight">
-                {daysCount} {lang === "zh" ? "天相守" : "Days Together"}
-              </h1>
-              <p className="text-[10px] tracking-widest text-stone-400 font-sans uppercase font-black">
-                {lang === "zh" ? "写 意 生 活 • 情 侣 编 年 史" : "L'Amour Chronicle Scrapbook"}
-              </p>
-            </div>
-
-            <p className="text-[11px] text-[#735858]/80 font-serif leading-relaxed italic max-w-xs mx-auto px-2">
-              "{lang === "zh" ? "锁住了属于我们的甜蜜时刻，输入恋爱暗号开启" : "Our sacred diary lies behind the veil of our private gate. Enter custom passcode to unlock."}"
-            </p>
-          </div>
-
-          {/* Quick passcode pad / typing system */}
-          <form onSubmit={handleUnlockGate} className="space-y-5">
-            <div className="space-y-1.5 text-left">
-              <label className="block text-[10px] uppercase font-bold text-stone-400 tracking-widest text-center">
-                {lang === "zh" ? "请输入解锁密语" : "Type passcode word"}
-              </label>
-              
-              <div className="relative">
-                <input
-                  type="password"
-                  placeholder={lang === "zh" ? "如默认密码 'love'" : "e.g. default 'love'..."}
-                  value={lockPin}
-                  onChange={(e) => {
-                    setLockPin(e.target.value);
-                    setLockError("");
-                  }}
-                  className="w-full text-center text-sm p-4 border border-rose-100 focus:ring-1 focus:ring-rose-200 focus:border-[#ad292f] bg-stone-50/50 rounded-2xl outline-none transition-all font-black tracking-widest text-[#ad292f]"
-                  autoFocus
-                />
-              </div>
-              
-              {lockError ? (
-                <p className="text-rose-600 text-[10px] text-center font-bold mt-2 animate-bounce">
-                  {lockError}
-                </p>
-              ) : (
-                <p className="text-[9.5px] text-stone-400 text-center font-semibold mt-1 bg-amber-50/40 py-1 rounded-xl">
-                  💡 {t.lockHint}
-                </p>
-              )}
-            </div>
-
-            {/* Quick Helper presets for speedier testing and playfulness on login */}
-            <div className="grid grid-cols-4 gap-2 pt-1">
-              {["l", "o", "v", "e"].map((char) => (
-                <button
-                  key={`preset-${char}`}
-                  type="button"
-                  onClick={() => {
-                    audio.playTap();
-                    setLockPin(p => p + char);
-                  }}
-                  className="bg-stone-50 hover:bg-rose-50 border border-stone-200/30 text-stone-700 text-xs font-black py-2.5 rounded-xl cursor-pointer hover:border-[#ad292f]/30 transition-all active:scale-95"
-                >
-                  {char}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex gap-2.5 pt-2">
+        {/* Main content — vertically centered */}
+        <div className="flex-1 flex flex-col items-center justify-center px-6 pb-12">
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 260, damping: 22 }}
+            className="w-full max-w-sm space-y-10 text-center"
+          >
+            {/* Hero heart + days count */}
+            <div className="space-y-5">
               <button
                 type="button"
-                onClick={() => {
-                  audio.playTap();
-                  setLockPin("");
-                }}
-                className="w-1/3 bg-stone-55 hover:bg-stone-100 text-stone-500 py-4 rounded-2.5xl text-xs font-bold transition-all cursor-pointer text-center"
+                onClick={(e) => spawnHearts(e)}
+                className="w-20 h-20 rounded-full bg-gradient-to-tr from-[#ad292f] to-rose-400 text-white flex items-center justify-center mx-auto shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer relative group animate-heartbeat"
               >
-                {lang === "zh" ? "重置" : "Clear"}
+                <Heart size={30} fill="#ffffff" className="text-white" />
+                <span className="absolute -top-1 -right-1 bg-amber-400 text-stone-900 text-[8px] font-black px-1.5 py-0.5 rounded-full animate-bounce">
+                  +1💖
+                </span>
               </button>
-              <button
-                type="submit"
-                className="flex-1 bg-[#ad292f] hover:bg-[#ad292f]/95 text-white py-4 rounded-2.5xl text-xs font-black shadow-lg shadow-rose-250 transition-all hover:scale-[1.01] active:scale-99 cursor-pointer"
-              >
-                {t.unlockBtn}
-              </button>
-            </div>
-          </form>
 
-          {/* Miniature footer branding */}
-          <div className="border-t border-stone-100 pt-5 flex items-center justify-center gap-1.5 text-[9.5px] text-stone-400 font-semibold select-all">
-            <ShieldCheck size={12} className="text-[#ad292f]" />
-            <span>AI Studio Secure Passcode Protocol Layer Verified</span>
-          </div>
-        </motion.div>
+              <div className="space-y-1">
+                <h1 className="font-serif text-5xl font-black text-[#ad292f] tracking-tight leading-none">
+                  {daysCount}
+                </h1>
+                <p className="text-sm font-bold text-stone-500 tracking-widest uppercase">
+                  {lang === "zh" ? "天相守" : "Days Together"}
+                </p>
+                <p className="text-[11px] text-stone-400 font-medium italic pt-1">
+                  {lang === "zh" ? "锁住了属于我们的甜蜜时刻" : "Our private moments await you"}
+                </p>
+              </div>
+            </div>
+
+            {/* Password form */}
+            <form onSubmit={handleUnlockGate} className="space-y-4 w-full">
+              <div className="space-y-1.5">
+                <label className="block text-[10px] uppercase font-bold text-stone-400 tracking-widest">
+                  {lang === "zh" ? "请输入解锁密语" : "Enter passcode"}
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPin ? "text" : "password"}
+                    placeholder={lang === "zh" ? "输入解锁暗号..." : "Enter passcode..."}
+                    value={lockPin}
+                    onChange={(e) => { setLockPin(e.target.value); setLockError(""); }}
+                    className="w-full text-center text-base p-4 pr-12 border-2 border-rose-100 focus:border-[#ad292f] bg-white/80 rounded-2xl outline-none transition-all font-black tracking-widest text-[#ad292f] shadow-sm"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPin(s => !s)}
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-[#ad292f] transition-colors p-1 cursor-pointer"
+                  >
+                    {showPin ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+                {lockError && (
+                  <p className="text-rose-600 text-[10px] text-center font-bold animate-bounce">{lockError}</p>
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => { audio.playTap(); setLockPin(""); }}
+                  className="w-1/3 bg-white border border-stone-200 text-stone-500 py-4 rounded-2xl text-xs font-bold transition-all cursor-pointer hover:bg-stone-50 active:scale-95 shadow-sm"
+                >
+                  {lang === "zh" ? "重置" : "Clear"}
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 bg-[#ad292f] hover:bg-[#ad292f]/90 text-white py-4 rounded-2xl text-sm font-black shadow-lg shadow-rose-200 transition-all hover:scale-[1.01] active:scale-95 cursor-pointer"
+                >
+                  {t.unlockBtn}
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+
+        {/* Bottom branding */}
+        <div className="pb-8 flex items-center justify-center gap-1.5 text-[9px] text-stone-300 font-medium">
+          <ShieldCheck size={11} className="text-[#ad292f]/40" />
+          <span>爱情手帐 · 安全私密归档</span>
+        </div>
+
+        {/* Login heart burst overlay */}
+        <AnimatePresence>
+          {showLoginHeart && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 flex flex-col items-center justify-center z-[500] pointer-events-none"
+              style={{ background: "radial-gradient(circle, rgba(173,41,47,0.15) 0%, rgba(255,255,255,0.95) 70%)" }}
+            >
+              {/* Central large heart */}
+              <motion.div
+                initial={{ scale: 0, rotate: -15 }}
+                animate={{ scale: [0, 1.3, 1.1], rotate: [0, 8, 0] }}
+                transition={{ duration: 0.7, ease: "easeOut" }}
+                className="text-[#ad292f]"
+              >
+                <Heart size={80} fill="#ad292f" />
+              </motion.div>
+              {/* Floating mini hearts */}
+              {[...Array(8)].map((_, i) => (
+                <motion.div
+                  key={i}
+                  className="absolute text-[#ad292f]"
+                  style={{ left: `${15 + i * 10}%`, top: `${30 + (i % 3) * 15}%` }}
+                  initial={{ opacity: 0, y: 0, scale: 0 }}
+                  animate={{ opacity: [0, 1, 0], y: -60 - i * 10, scale: [0, 1, 0.5] }}
+                  transition={{ delay: 0.1 + i * 0.08, duration: 1.0 }}
+                >
+                  <Heart size={12 + (i % 3) * 8} fill="#ad292f" />
+                </motion.div>
+              ))}
+              <motion.p
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.4 }}
+                className="mt-6 text-[#ad292f] font-serif font-black text-lg"
+              >
+                {lang === "zh" ? "欢迎回来 💖" : "Welcome Back 💖"}
+              </motion.p>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     );
   }
@@ -439,7 +562,7 @@ export default function App() {
 
             {/* Serif Typography matching the style target precisely */}
             <div className="flex flex-col min-w-0">
-              <h1 className="font-serif text-xl sm:text-2.5xl font-black text-[#ad292f] tracking-[0.03em] leading-none">
+              <h1 className="font-serif text-xl sm:text-2xl font-black text-[#ad292f] tracking-[0.03em] leading-none">
                 {daysCount} {profile.language === 'zh' ? '天' : 'DAYS'}
               </h1>
               <span className="text-[10px] tracking-widest text-stone-400 font-sans uppercase font-semibold mt-1.5 whitespace-nowrap leading-none">
@@ -542,7 +665,7 @@ export default function App() {
               onAnimationComplete={() => {
                 setHeartParticles(prev => prev.filter(p => p.id !== pt.id));
               }}
-              className="absolute text-2.5xl filter drop-shadow-md select-none pointer-events-none"
+              className="absolute text-2xl filter drop-shadow-md select-none pointer-events-none"
             >
               {pt.emoji}
             </motion.div>
