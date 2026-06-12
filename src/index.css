@@ -1,0 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Space+Grotesk:wght@300..700&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-sans: "Inter", sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+}
+
+@keyframes custom-heartbeat {
+  0%, 100% {
+    transform: scale(1);
+  }
+  20% {
+    transform: scale(1.18);
+  }
+  40% {
+    transform: scale(1.02);
+  }
+  60% {
+    transform: scale(1.24);
+  }
+  80% {
+    transform: scale(1);
+  }
+}
+
+.animate-heartbeat {
+  transform-origin: center;
+  animation: custom-heartbeat 1.4s infinite ease-in-out;
+}
+
+/* Custom CSS Helpers for layout typography */
+.title-font {
+  font-family: "Space Grotesk", "Inter", sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.display-font {
+  font-family: "Playfair Display", Georgia, serif;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}

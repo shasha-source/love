@@ -1,0 +1,6 @@
+{
+  "name": "1945 Days Together",
+  "description": "An elegant romantic digital scrapbook, diary, and calendar for couples with timeline moments, handwriting-styled diaries, and AI memory insights.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
