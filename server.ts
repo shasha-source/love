@@ -122,12 +122,29 @@ app.post("/api/upload-media", upload.single("file"), async (req, res) => {
 
 // âââ Data CRUD endpoints ââââââââââââââââââââââââââââââââââââââââââ
 
+
+// Strip base64 data: URLs to keep DB lean
+function stripBase64Post(p: any) {
+  return {
+    ...p,
+    imageUrl: typeof p.imageUrl === "string" && p.imageUrl.startsWith("data:") ? undefined : p.imageUrl,
+    videoUrl: typeof p.videoUrl === "string" && p.videoUrl.startsWith("data:") ? undefined : p.videoUrl,
+    comments: Array.isArray(p.comments)
+      ? p.comments.map((c: any) => ({
+          ...c,
+          mediaUrl: typeof c.mediaUrl === "string" && c.mediaUrl.startsWith("data:") ? undefined : c.mediaUrl,
+        }))
+      : p.comments,
+  };
+}
+
 // GET /api/posts
 app.get("/api/posts", async (_req, res) => {
   if (!sql) return res.json([]);
   try {
     const rows = (await sql`SELECT data FROM posts ORDER BY (data->>'timestamp') ASC`) as any[];
-    res.json(rows.map((r: any) => r.data));
+    // Strip base64 before returning — keeps mobile payload small
+    res.json(rows.map((r: any) => stripBase64Post(r.data)));
   } catch (err) {
     console.error("GET /api/posts error:", err);
     res.json([]);
@@ -144,9 +161,8 @@ app.put("/api/posts", async (req, res) => {
     await sql`DELETE FROM posts`;
     for (const p of posts) {
       const id = String(p.id);
-      const data = JSON.stringify(p);
+      const data = JSON.stringify(stripBase64Post(p));
       await sql`INSERT INTO posts (id, data) VALUES (${id}, ${data}::jsonb)`;
-    }
     }
     res.json({ ok: true, persisted: true });
   } catch (err) {

@@ -26,6 +26,22 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
+
+// Strip base64 data: URLs before saving — prevents localStorage quota crash and DB bloat
+function stripBase64<T extends Record<string, any>>(items: T[]): T[] {
+  return items.map(item => ({
+    ...item,
+    imageUrl: typeof item.imageUrl === "string" && item.imageUrl.startsWith("data:") ? undefined : item.imageUrl,
+    videoUrl: typeof item.videoUrl === "string" && item.videoUrl.startsWith("data:") ? undefined : item.videoUrl,
+    comments: Array.isArray(item.comments)
+      ? item.comments.map((c: any) => ({
+          ...c,
+          mediaUrl: typeof c.mediaUrl === "string" && c.mediaUrl.startsWith("data:") ? undefined : c.mediaUrl,
+        }))
+      : item.comments,
+  }));
+}
+
 export default function App() {
   // 10. Startup Loading Screen state
   const [appIsLoading, setAppIsLoading] = useState(true);
@@ -181,7 +197,7 @@ export default function App() {
 
   // ── Keep localStorage in sync AND debounce-save to DB when dbReady ──
   useEffect(() => {
-    localStorage.setItem("couple_profile", JSON.stringify(profile));
+    try { localStorage.setItem("couple_profile", JSON.stringify(profile)); } catch { /* quota exceeded */ }
     if (!dbReady) return;
     clearTimeout(saveTimers.current.profile);
     saveTimers.current.profile = setTimeout(() => {
@@ -194,40 +210,43 @@ export default function App() {
   }, [profile, dbReady]);
 
   useEffect(() => {
-    localStorage.setItem("couple_posts", JSON.stringify(posts));
+    const safePosts = stripBase64(posts);
+    try { localStorage.setItem("couple_posts", JSON.stringify(safePosts)); } catch { /* quota exceeded */ }
     if (!dbReady) return;
     clearTimeout(saveTimers.current.posts);
     saveTimers.current.posts = setTimeout(() => {
       fetch("/api/posts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ posts }),
+        body: JSON.stringify({ posts: safePosts }),
       }).catch(() => {});
     }, 800);
   }, [posts, dbReady]);
 
   useEffect(() => {
-    localStorage.setItem("couple_diary_entries", JSON.stringify(entries));
+    const safeEntries = stripBase64(entries);
+    try { localStorage.setItem("couple_diary_entries", JSON.stringify(safeEntries)); } catch { /* quota exceeded */ }
     if (!dbReady) return;
     clearTimeout(saveTimers.current.diary);
     saveTimers.current.diary = setTimeout(() => {
       fetch("/api/diary", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entries }),
+        body: JSON.stringify({ entries: safeEntries }),
       }).catch(() => {});
     }, 800);
   }, [entries, dbReady]);
 
   useEffect(() => {
-    localStorage.setItem("couple_events", JSON.stringify(events));
+    const safeEvents = stripBase64(events);
+    try { localStorage.setItem("couple_events", JSON.stringify(safeEvents)); } catch { /* quota exceeded */ }
     if (!dbReady) return;
     clearTimeout(saveTimers.current.events);
     saveTimers.current.events = setTimeout(() => {
       fetch("/api/events", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ events }),
+        body: JSON.stringify({ events: safeEvents }),
       }).catch(() => {});
     }, 800);
   }, [events, dbReady]);
@@ -630,7 +649,7 @@ export default function App() {
                 profile={profile}
                 onUpdateProfile={setProfile}
                 language={lang}
-                onLogout={() => setIsLocked(true)} // Links cleanly to secure gate locker (#9)
+                onLogout={() => setIsLocked(true)}
               />
             )}
           </motion.div>

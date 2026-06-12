@@ -2078,7 +2078,7 @@ export default function TimelineTab({
                                           const d = await res.json();
                                           setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: d.url, type: isVid ? "video" : "image" } }));
                                         } catch {
-                                          if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [post.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                                          alert(language === "zh" ? "图片上传失败，请检查网络后重试" : "Image upload failed, please retry");
                                         }
                                         ev.target.value = "";
                                       }} />
@@ -2226,7 +2226,7 @@ export default function TimelineTab({
                                         const d = await res.json();
                                         setCommentPendingMedia(prev => ({ ...prev, [ev.id]: { url: d.url, type: isVid ? "video" : "image" } }));
                                       } catch {
-                                        if (isImg) { const r = new FileReader(); r.onload = e => setCommentPendingMedia(prev => ({ ...prev, [ev.id]: { url: e.target?.result as string, type: "image" } })); r.readAsDataURL(file); }
+                                        alert(language === "zh" ? "图片上传失败，请检查网络后重试" : "Image upload failed, please retry");
                                       }
                                       evinput.target.value = "";
                                     }} />
