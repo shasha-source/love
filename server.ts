@@ -14,7 +14,7 @@ const PORT = parseInt(process.env.PORT || "3000");
 
 app.use(express.json({ limit: "50mb" }));
 
-// ─── Cloudinary ───────────────────────────────────────────────────
+// âââ Cloudinary âââââââââââââââââââââââââââââââââââââââââââââââââââ
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -43,12 +43,12 @@ async function uploadToCloudinary(
   });
 }
 
-// ─── Neon Database ────────────────────────────────────────────────
+// âââ Neon Database ââââââââââââââââââââââââââââââââââââââââââââââââ
 let sql: ReturnType<typeof neon> | null = null;
 
 async function initDB() {
   if (!process.env.DATABASE_URL) {
-    console.warn("No DATABASE_URL set — data will not persist to Neon.");
+    console.warn("No DATABASE_URL set â data will not persist to Neon.");
     return;
   }
   try {
@@ -88,7 +88,7 @@ async function initDB() {
   }
 }
 
-// ─── Media Upload ─────────────────────────────────────────────────
+// âââ Media Upload âââââââââââââââââââââââââââââââââââââââââââââââââ
 // Use memory storage so we can stream to Cloudinary
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -120,7 +120,7 @@ app.post("/api/upload-media", upload.single("file"), async (req, res) => {
   res.json({ url: dataUrl });
 });
 
-// ─── Data CRUD endpoints ──────────────────────────────────────────
+// âââ Data CRUD endpoints ââââââââââââââââââââââââââââââââââââââââââ
 
 // GET /api/posts
 app.get("/api/posts", async (_req, res) => {
@@ -134,22 +134,19 @@ app.get("/api/posts", async (_req, res) => {
   }
 });
 
-// PUT /api/posts — replaces all posts
+// PUT /api/posts â replaces all posts
 app.put("/api/posts", async (req, res) => {
   if (!sql) return res.json({ ok: true, persisted: false });
   const { posts } = req.body as { posts: any[] };
   if (!Array.isArray(posts)) return res.status(400).json({ error: "posts must be array" });
   try {
-    if (posts.length === 0) {
-      await sql`DELETE FROM posts`;
-    } else {
-      const ids = posts.map((p) => p.id) as string[];
-      const datas = posts.map((p) => JSON.stringify(p));
-      await sql`DELETE FROM posts`;
-      await sql`
-        INSERT INTO posts (id, data)
-        SELECT * FROM UNNEST(${ids}::text[], ${datas}::jsonb[])
-      `;
+
+    await sql`DELETE FROM posts`;
+    for (const p of posts) {
+      const id = String(p.id);
+      const data = JSON.stringify(p);
+      await sql`INSERT INTO posts (id, data) VALUES (${id}, ${data}::jsonb)`;
+    }
     }
     res.json({ ok: true, persisted: true });
   } catch (err) {
@@ -170,22 +167,19 @@ app.get("/api/events", async (_req, res) => {
   }
 });
 
-// PUT /api/events — replaces all events
+// PUT /api/events â replaces all events
 app.put("/api/events", async (req, res) => {
   if (!sql) return res.json({ ok: true, persisted: false });
   const { events } = req.body as { events: any[] };
   if (!Array.isArray(events)) return res.status(400).json({ error: "events must be array" });
   try {
-    if (events.length === 0) {
-      await sql`DELETE FROM events`;
-    } else {
-      const ids = events.map((e) => e.id) as string[];
-      const datas = events.map((e) => JSON.stringify(e));
-      await sql`DELETE FROM events`;
-      await sql`
-        INSERT INTO events (id, data)
-        SELECT * FROM UNNEST(${ids}::text[], ${datas}::jsonb[])
-      `;
+
+    await sql`DELETE FROM events`;
+    for (const e of events) {
+      const id = String(e.id);
+      const data = JSON.stringify(e);
+      await sql`INSERT INTO events (id, data) VALUES (${id}, ${data}::jsonb)`;
+    }
     }
     res.json({ ok: true, persisted: true });
   } catch (err) {
@@ -206,22 +200,19 @@ app.get("/api/diary", async (_req, res) => {
   }
 });
 
-// PUT /api/diary — replaces all diary entries
+// PUT /api/diary â replaces all diary entries
 app.put("/api/diary", async (req, res) => {
   if (!sql) return res.json({ ok: true, persisted: false });
   const { entries } = req.body as { entries: any[] };
   if (!Array.isArray(entries)) return res.status(400).json({ error: "entries must be array" });
   try {
-    if (entries.length === 0) {
-      await sql`DELETE FROM diary_entries`;
-    } else {
-      const ids = entries.map((e) => e.id) as string[];
-      const datas = entries.map((e) => JSON.stringify(e));
-      await sql`DELETE FROM diary_entries`;
-      await sql`
-        INSERT INTO diary_entries (id, data)
-        SELECT * FROM UNNEST(${ids}::text[], ${datas}::jsonb[])
-      `;
+
+    await sql`DELETE FROM diary_entries`;
+    for (const e of entries) {
+      const id = String(e.id);
+      const data = JSON.stringify(e);
+      await sql`INSERT INTO diary_entries (id, data) VALUES (${id}, ${data}::jsonb)`;
+    }
     }
     res.json({ ok: true, persisted: true });
   } catch (err) {
@@ -258,7 +249,7 @@ app.put("/api/profile", async (req, res) => {
   }
 });
 
-// ─── Gemini AI ────────────────────────────────────────────────────
+// âââ Gemini AI ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 const apiKey = process.env.GEMINI_API_KEY;
 let ai: GoogleGenAI | null = null;
 if (apiKey && apiKey !== "MY_GEMINI_API_KEY") {
@@ -272,7 +263,7 @@ if (apiKey && apiKey !== "MY_GEMINI_API_KEY") {
     console.error("Failed to initialize Gemini GenAI client:", error);
   }
 } else {
-  console.log("No valid GEMINI_API_KEY — AI will use fallback responses.");
+  console.log("No valid GEMINI_API_KEY â AI will use fallback responses.");
 }
 
 // REST API for AI Summary Insights
@@ -283,7 +274,7 @@ app.post("/api/ai-summarize", async (req, res) => {
     return res.json({
       summary:
         language === "zh"
-          ? "写下你们的第一条回忆吧！AI 会在这里总结你们的甜蜜瞬间。"
+          ? "åä¸ä½ ä»¬çç¬¬ä¸æ¡åå¿å§ï¼AI ä¼å¨è¿éæ»ç»ä½ ä»¬ççèç¬é´ã"
           : "Share your first memory! AI will summarize your intimate moments here.",
     });
   }
@@ -298,7 +289,7 @@ app.post("/api/ai-summarize", async (req, res) => {
         evts
           .map(
             (ev: any) =>
-              `[${ev.eventType} on ${ev.date}]: "${ev.title}" — ${ev.description || ""}${ev.location ? ` @ ${ev.location}` : ""}`
+              `[${ev.eventType} on ${ev.date}]: "${ev.title}" â ${ev.description || ""}${ev.location ? ` @ ${ev.location}` : ""}`
           )
           .join("\n")
       : "";
@@ -337,15 +328,15 @@ Please output a beautiful ${type === "timeline" ? "intimate summary" : type === 
 
   const fallbacks: Record<string, Record<string, string>> = {
     timeline: {
-      zh: `"你们今天分享了关于清晨琐碎仪式的记录。早晨一起喝咖啡、分享阳台上的宁静，显然是你们近来维系亲密感的重要支柱。继续在微小的事物中寻找彼此吧。"`,
+      zh: `"ä½ ä»¬ä»å¤©åäº«äºå³äºæ¸æ¨çç¢ä»ªå¼çè®°å½ãæ©æ¨ä¸èµ·ååå¡ãåäº«é³å°ä¸çå®éï¼æ¾ç¶æ¯ä½ ä»¬è¿æ¥ç»´ç³»äº²å¯æçéè¦æ¯æ±ãç»§ç»­å¨å¾®å°çäºç©ä¸­å¯»æ¾å½¼æ­¤å§ã"`,
       en: `"You've shared moments focusing on small daily rituals today. Keep finding magic in the little things."`,
     },
     diary: {
-      zh: `"一段充满欢笑与温馨宁静的篇章。你们正在把平凡的日子过成诗。"`,
+      zh: `"ä¸æ®µåæ»¡æ¬¢ç¬ä¸æ¸©é¦¨å®éçç¯ç« ãä½ ä»¬æ­£å¨æå¹³å¡çæ¥å­è¿æè¯ã"`,
       en: `"A beautiful chapter defined by laughter and playful messes. Every setback turns into a treasured wonder."`,
     },
     calendar: {
-      zh: `"每一个誓之日，都载着你们的欢笑。那些珍贵的纪念日，见证了你们共同走过的浪漫光阴。"`,
+      zh: `"æ¯ä¸ä¸ªèªä¹æ¥ï¼é½è½½çä½ ä»¬çæ¬¢ç¬ãé£äºçè´µççºªå¿µæ¥ï¼è§è¯äºä½ ä»¬å±åèµ°è¿çæµªæ¼«åé´ã"`,
       en: `"Each anniversary day carries your shared laughter and precious memories through the years."`,
     },
   };
@@ -367,14 +358,14 @@ app.post("/api/ai-chat", async (req, res) => {
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.json({
-      reply: language === "zh" ? "欢迎开启爱心问答 💖" : "Welcome to Memory Oracle 💖",
+      reply: language === "zh" ? "æ¬¢è¿å¼å¯ç±å¿é®ç­ ð" : "Welcome to Memory Oracle ð",
     });
   }
 
-  const systemInstruction = `You are an incredibly loving, sentiment-rich relationship memories assistant named "Gemini 爱意回忆家" for the couple ${partner1} and ${partner2}.
+  const systemInstruction = `You are an incredibly loving, sentiment-rich relationship memories assistant named "Gemini ç±æåå¿å®¶" for the couple ${partner1} and ${partner2}.
 They have been together for over 1945 days. You have complete context-awareness of their shared photos, mood changes, coffee sessions, pasta kitchen failures, lakehouse trips, and anniversary milestones.
 Your absolute mission is to answer questions about their dates, stories, and inside jokes, summarizing their love patterns in a romantic, poetic, supportive, and emotionally warm tone.
-Use cute emoji icons (🌸, 💖, ☕, 🍃, 🧸, 🍰) to create a scrapbooking vibe.
+Use cute emoji icons (ð¸, ð, â, ð, ð§¸, ð°) to create a scrapbooking vibe.
 If they ask something that is NOT mentioned in their shared logs, do not hallucinate dates or events; instead, reply with something sweet and encouraging.
 Always write in Simplified Chinese (zh) by default, or English (en) if requested.`;
 
@@ -423,18 +414,18 @@ Couple Question: "${lastUserMessage}"`;
   }
 
   const zhFallbacks = [
-    "在你们并肩走过的 1945 天里，每一口 balcony 咖啡 ☕ 都是甜的，每一次 pasta night 🍝 虽然手忙脚乱，但有你在就全是幸福。💖",
-    "浮世三千，吾有三喜，日、月与卿…… 你们把琐碎的生活过成了让人羡慕不己的童话日记。今天也是爱意满满的一天呢 🌸",
+    "å¨ä½ ä»¬å¹¶è©èµ°è¿ç 1945 å¤©éï¼æ¯ä¸å£ balcony åå¡ â é½æ¯ççï¼æ¯ä¸æ¬¡ pasta night ð è½ç¶æå¿èä¹±ï¼ä½æä½ å¨å°±å¨æ¯å¹¸ç¦ãð",
+    "æµ®ä¸ä¸åï¼å¾æä¸åï¼æ¥ãæä¸å¿â¦â¦ ä½ ä»¬æçç¢ççæ´»è¿æäºè®©äººç¾¡æä¸å·±çç«¥è¯æ¥è®°ãä»å¤©ä¹æ¯ç±ææ»¡æ»¡çä¸å¤©å¢ ð¸",
   ];
   const enFallbacks = [
-    "Across your precious 1945 days, every morning coffee ☕ and shared giggle proves that your souls are synchronized. 💖",
+    "Across your precious 1945 days, every morning coffee â and shared giggle proves that your souls are synchronized. ð",
   ];
   const fallbackArr = language === "zh" ? zhFallbacks : enFallbacks;
   const reply = fallbackArr[Math.floor(Math.random() * fallbackArr.length)];
   return res.json({ reply });
 });
 
-// ─── Start server ─────────────────────────────────────────────────
+// âââ Start server âââââââââââââââââââââââââââââââââââââââââââââââââ
 async function start() {
   await initDB();
 
