@@ -111,31 +111,25 @@ export default function ProfileTab({ profile, onUpdateProfile, language, onLogou
     }
   }[language];
 
-  // FileReader local avatar upload handler (#7)
-  const handleLocalImageUpload = (partner: "partner1" | "partner2", file: File) => {
+  // Avatar upload handler — uploads to Cloudinary to avoid base64 bloating localStorage
+  const handleLocalImageUpload = async (partner: "partner1" | "partner2", file: File) => {
     if (!file) return;
-    
-    // Check file size limit (keep under ~3MB for localStorage safety)
-    if (file.size > 3 * 1024 * 1024) {
-      alert(language === "zh" ? "图片太大啦！请上传小于 3MB 的精致图片哦 🧸" : "File size is too large (max 3MB)");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const base64Url = e.target?.result as string;
-      if (base64Url) {
-        if (partner === "partner1") {
-          setP1Avatar(base64Url);
-          // Auto sync instantly to profile to reflect local upload immediately!
-          onUpdateProfile({ ...profile, partner1Avatar: base64Url });
-        } else {
-          setP2Avatar(base64Url);
-          onUpdateProfile({ ...profile, partner2Avatar: base64Url });
-        }
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch("/api/upload-media", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!data.url) throw new Error("No URL");
+      if (partner === "partner1") {
+        setP1Avatar(data.url);
+        onUpdateProfile({ ...profile, partner1Avatar: data.url });
+      } else {
+        setP2Avatar(data.url);
+        onUpdateProfile({ ...profile, partner2Avatar: data.url });
       }
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      alert(language === "zh" ? "头像上传失败，请检查网络后重试 🧸" : "Avatar upload failed, please retry");
+    }
   };
 
   // Drag and drop event handlers

@@ -197,14 +197,20 @@ export default function App() {
 
   // ── Keep localStorage in sync AND debounce-save to DB when dbReady ──
   useEffect(() => {
-    try { localStorage.setItem("couple_profile", JSON.stringify(profile)); } catch { /* quota exceeded */ }
+    // Strip base64 avatars — they belong in Cloudinary, not localStorage/DB
+    const safeProfile = {
+      ...profile,
+      partner1Avatar: typeof profile.partner1Avatar === "string" && profile.partner1Avatar.startsWith("data:") ? undefined : profile.partner1Avatar,
+      partner2Avatar: typeof profile.partner2Avatar === "string" && profile.partner2Avatar.startsWith("data:") ? undefined : profile.partner2Avatar,
+    };
+    try { localStorage.setItem("couple_profile", JSON.stringify(safeProfile)); } catch { /* quota exceeded */ }
     if (!dbReady) return;
     clearTimeout(saveTimers.current.profile);
     saveTimers.current.profile = setTimeout(() => {
       fetch("/api/profile", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(profile),
+        body: JSON.stringify(safeProfile),
       }).catch(() => {});
     }, 800);
   }, [profile, dbReady]);
